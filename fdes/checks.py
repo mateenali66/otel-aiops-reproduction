@@ -1,0 +1,158 @@
+"""FDES v1.0.0-draft selection checks.
+
+Each function maps to a numbered section of SPEC.md:
+
+  section 2   predict-all baseline F1 = 2p / (1 + p) at prevalence p
+  section 6   threshold-independent metrics from both families (AUC-ROC, PR-AUC)
+  section 7   every operating-point score is reported next to the predict-all floor
+              and every threshold-independent score next to its random reference
+  section 8a  exclude when a threshold-independent score is at or below the random reference
+  section 8b  exclude when an operating-point score sits within the stated margin of the
+              predict-all floor with recall near saturation (flag-everything regime)
+
+The "degenerate" column reproduces the rule used for Table 12 / metric_reconciliation.csv
+in the IEEE Access article: AUC-ROC <= 0.55 and F1 >= 0.95 x predict-all F1.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
+
+RANDOM_AUC_REFERENCE = 0.5      # section 7, ROC family
+FLOOR_MARGIN = 0.05             # section 8b, "stated margin" used by this package (5 percent)
+RECALL_SATURATION = 0.95        # section 8b, "recall near saturation"
+DEGENERATE_AUC = 0.55           # article rule (Table 12)
+DEGENERATE_F1_RATIO = 0.95      # article rule (Table 12)
+
+
+def predict_all_f1(prevalence: float) -> float:
+    """Section 2: F1 of a detector that flags every window."""
+    return 2.0 * prevalence / (1.0 + prevalence)
+
+
+def check_row(prevalence: float, f1: float, recall: float, auc_roc: float,
+              pr_auc: float | None = None) -> dict:
+    """Apply the section 7 and 8 checks to one (detector, signal, fold) result."""
+    floor = predict_all_f1(prevalence)
+    sec8a = bool(auc_roc <= RANDOM_AUC_REFERENCE)
+    sec8b = bool(f1 >= (1.0 - FLOOR_MARGIN) * floor and recall >= RECALL_SATURATION)
+    degenerate = bool(auc_roc <= DEGENERATE_AUC and f1 >= DEGENERATE_F1_RATIO * floor)
+    verdict = "EXCLUDE" if (sec8a or sec8b) else "PASS"
+    return {
+        "prevalence": round(float(prevalence), 4),
+        "f1_predict_all": round(floor, 4),
+        "f1_score": round(float(f1), 4),
+        "f1_minus_floor": round(float(f1) - floor, 4),
+        "recall": round(float(recall), 4),
+        "auc_roc": round(float(auc_roc), 4),
+        "auc_random_reference": RANDOM_AUC_REFERENCE,
+        "pr_auc": None if pr_auc is None else round(float(pr_auc), 4),
+        "pr_random_reference": round(float(prevalence), 4),
+        "sec8a_auc_at_or_below_random": sec8a,
+        "sec8b_flag_everything": sec8b,
+        "degenerate_table12_rule": degenerate,
+        "fdes_verdict": verdict,
+    }
+
+
+def checks_from_model_results(model_results: pd.DataFrame) -> pd.DataFrame:
+    """Section 7 and 8 checks for every row of a model_results.csv produced by the pipeline.
+
+    Prevalence is true_anomalies / total_samples of the evaluated (cooldown-excluded) test set.
+    """
+    rows = []
+    for r in model_results.itertuples(index=False):
+        p = r.true_anomalies / max(int(r.total_samples), 1)
+        c = check_row(p, r.f1_score, r.recall, r.auc_roc, getattr(r, "pr_auc", None))
+        rows.append({"model": r.model, "signal_type": r.signal_type, "fold": int(r.fold), **c})
+    return pd.DataFrame(rows)
+
+
+def checks_from_scores(y: np.ndarray, scores: np.ndarray, threshold: float) -> dict:
+    """Section 6 to 8 checks computed directly from raw scores and labels."""
+    y = np.asarray(y).astype(int).ravel()
+    s = np.asarray(scores).astype(float).ravel()
+    n = min(len(y), len(s))
+    y, s = y[:n], s[:n]
+    p = float(y.mean())
+    preds = (s >= threshold).astype(int)
+    f1 = f1_score(y, preds, zero_division=0)
+    recall = float(preds[y == 1].mean()) if (y == 1).any() else 0.0
+    auc = roc_auc_score(y, s) if 0 < y.sum() < len(y) else float("nan")
+    ap = average_precision_score(y, s) if 0 < y.sum() < len(y) else float("nan")
+    out = check_row(p, f1, recall, auc, ap)
+    out["mean_predicted_rate"] = round(float(preds.mean()), 4)
+    out["pr_lift_normalized"] = round((ap - p) / (1 - p), 4) if (1 - p) > 0 else None
+    return out
+
+
+def below_chance_models(table: pd.DataFrame, auc_col: str = "auc_roc_mean") -> dict:
+    """Section 8a applied at the model level: mean AUC-ROC below 0.5 on every evaluated signal.
+
+    This is the article's "three of eight" (37.5 percent) figure.
+    """
+    per_model = table.groupby("model")[auc_col].max()
+    below = sorted(per_model[per_model < RANDOM_AUC_REFERENCE].index.tolist())
+    n_models = int(per_model.shape[0])
+    return {
+        "rule": "mean AUC-ROC across folds below 0.5 on every evaluated signal (FDES section 8a)",
+        "n_models_evaluated": n_models,
+        "n_signals_evaluated": int(table["signal_type"].nunique()),
+        "models_below_chance": below,
+        "n_below_chance": len(below),
+        "fraction_below_chance": round(len(below) / n_models, 4) if n_models else None,
+    }
+
+
+def metric_reconciliation_from_raw_scores(raw_scores_dir, model_results_csv) -> pd.DataFrame:
+    """Recompute the archived metric_reconciliation.csv (article Table 12 support) from raw scores.
+
+    Same formulas as code/analysis/score_based_analyses.py in the Zenodo artifact, kept here
+    so that the recomputation does not depend on that script's hard-coded paths. Raw scores
+    include cooldown windows, so prevalence here is the cooldown-included value.
+    """
+    import re
+    from pathlib import Path
+
+    raw_scores_dir = Path(raw_scores_dir)
+    mr = pd.read_csv(model_results_csv)
+    pat = re.compile(r"^(?P<model>.+)_(?P<signal>metrics|logs|traces)_fold(?P<fold>\d+)_scores\.npy$")
+    agg: dict[tuple[str, str], list[dict]] = {}
+    for f in sorted(raw_scores_dir.glob("*_scores.npy")):
+        m = pat.match(f.name)
+        if not m:
+            continue
+        lab = raw_scores_dir / f.name.replace("_scores.npy", "_labels.npy")
+        if not lab.exists():
+            continue
+        model, signal, fold = m["model"], m["signal"], int(m["fold"])
+        s = np.load(f).astype(float).ravel()
+        y = np.load(lab).astype(int).ravel()
+        n = min(len(s), len(y))
+        s, y = s[:n], y[:n]
+        if not (0 < y.sum() < len(y)):
+            continue
+        p = float(y.mean())
+        row = mr[(mr.model == model) & (mr.signal_type == signal) & (mr.fold == fold)]
+        thr = float(row["threshold"].iloc[0]) if len(row) and not pd.isna(row["threshold"].iloc[0]) \
+            else float(np.mean(s) + 2 * np.std(s))
+        preds = (s >= thr).astype(int)
+        agg.setdefault((model, signal), []).append(dict(
+            p=p, auc=roc_auc_score(y, s),
+            f1_val=f1_score(y, preds, zero_division=0),
+            pred_rate=float(preds.mean()),
+            f1_degen=predict_all_f1(p),
+        ))
+    rows = []
+    for (model, signal), recs in sorted(agg.items()):
+        d = pd.DataFrame(recs)
+        m = d.mean()
+        rows.append(dict(
+            model=model, signal=signal,
+            auc_roc=round(m.auc, 3), f1_validation_tuned=round(m.f1_val, 3),
+            prevalence=round(m.p, 3), f1_predict_all=round(m.f1_degen, 3),
+            mean_predicted_rate=round(m.pred_rate, 3),
+            degenerate=bool(m.auc <= DEGENERATE_AUC and m.f1_val >= DEGENERATE_F1_RATIO * m.f1_degen),
+        ))
+    return pd.DataFrame(rows)

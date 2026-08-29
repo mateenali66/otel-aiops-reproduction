@@ -1,0 +1,16 @@
+# Exact pins for the local (CPU) reproduction path. Discovered from the imports of
+# code/pipeline/training.py, code/analysis/*.py and code/figures/*.py in the Zenodo artifact.
+# No sagemaker or boto3: run_pipeline.py's SageMaker path is not used.
+numpy==1.26.4
+pandas==2.2.3
+pyarrow==17.0.0
+scikit-learn==1.5.2
+scipy==1.13.1
+optuna==4.1.0
+# torch: CPU build. On Linux install with
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+# (the Dockerfile does this); on macOS arm64 the PyPI wheel is already CPU-only.
+torch==2.5.1
+# figures only (code/figures/*.py)
+matplotlib==3.9.2
+seaborn==0.13.2
