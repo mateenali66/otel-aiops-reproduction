@@ -12,7 +12,7 @@ authors:
     orcid: https://orcid.org/0009-0001-7231-8515
     affiliation: Phono Technologies Inc.
 license: Apache-2.0
-repository-code: https://github.com/mateenali66/failure-detection-evaluation-spec
+repository-code: "https://github.com/mateenali66/otel-aiops-reproduction"
 keywords:
   - anomaly detection
   - OpenTelemetry
