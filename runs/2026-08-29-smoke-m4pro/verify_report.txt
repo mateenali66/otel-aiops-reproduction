@@ -1,0 +1,13 @@
+verify: out/smoke against /Users/mateen/mateen/phd/papers/paper5-opentelemetry-aiops/reproduction/expected
+ok   IsolationForest/logs/fold1/precision: got 0.4755 expected 0.4755 tol 0.020
+ok   IsolationForest/logs/fold1/recall: got 0.7420 expected 0.7420 tol 0.020
+ok   IsolationForest/logs/fold1/f1_score: got 0.5796 expected 0.5796 tol 0.020
+ok   IsolationForest/logs/fold1/auc_roc: got 0.6355 expected 0.6355 tol 0.020
+ok   IsolationForest/logs/fold1/pr_auc: got 0.5321 expected 0.5321 tol 0.020
+ok   OneClassSVM/logs/fold1/precision: got 0.3981 expected 0.3981 tol 0.020
+ok   OneClassSVM/logs/fold1/recall: got 0.9748 expected 0.9748 tol 0.020
+ok   OneClassSVM/logs/fold1/f1_score: got 0.5654 expected 0.5654 tol 0.020
+ok   OneClassSVM/logs/fold1/auc_roc: got 0.5852 expected 0.5852 tol 0.020
+ok   OneClassSVM/logs/fold1/pr_auc: got 0.5297 expected 0.5297 tol 0.020
+ok   DAGMM (reduced budget, structural only): F1 0.793 AUC 0.908 FDES verdict ['PASS']; not compared numerically
+RESULT: PASS (0 mismatch(es))
