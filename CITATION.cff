@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: >-
+  If you use this reproduction package, cite the IEEE Access article and the Zenodo
+  artifact it reproduces.
+type: software
+title: >-
+  Reproduction package for "Evaluating ML-Based Anomaly Detection on Unified
+  OpenTelemetry Telemetry" (FDES v1.0.0-draft reference implementation)
+authors:
+  - family-names: Anjum
+    given-names: Mateen Ali
+    orcid: https://orcid.org/0009-0001-7231-8515
+    affiliation: Phono Technologies Inc.
+license: Apache-2.0
+repository-code: https://github.com/mateenali66/failure-detection-evaluation-spec
+keywords:
+  - anomaly detection
+  - OpenTelemetry
+  - AIOps
+  - reproducibility
+  - benchmark specification
+references:
+  - type: article
+    title: >-
+      Evaluating ML-Based Anomaly Detection on Unified OpenTelemetry Telemetry: An
+      Empirical Study Across Traces, Metrics, and Logs
+    authors:
+      - family-names: Anjum
+        given-names: Mateen Ali
+    journal: IEEE Access
+    volume: 14
+    start: 93576
+    end: 93608
+    year: 2026
+    doi: 10.1109/ACCESS.2026.3705430
+  - type: data
+    title: >-
+      OpenTelemetry AIOps Benchmark: ML-based Anomaly Detection across Traces, Metrics,
+      and Logs (v3.1.3)
+    authors:
+      - family-names: Anjum
+        given-names: Mateen Ali
+    year: 2026
+    doi: 10.5281/zenodo.22078287
+    license: CC-BY-4.0
+  - type: generic
+    title: Failure Detection Evaluation Specification (FDES), version 1.0.0-draft
+    authors:
+      - family-names: Anjum
+        given-names: Mateen Ali
+    year: 2026
+    url: https://github.com/mateenali66/failure-detection-evaluation-spec
