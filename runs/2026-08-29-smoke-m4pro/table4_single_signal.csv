@@ -1,0 +1,4 @@
+model,signal_type,precision_mean,precision_std,recall_mean,recall_std,f1_score_mean,f1_score_std,auc_roc_mean,auc_roc_std,pr_auc_mean,pr_auc_std,n_folds
+IsolationForest,logs,0.4755,,0.742,,0.5796,,0.6355,,0.5321,,1
+OneClassSVM,logs,0.3981,,0.9748,,0.5654,,0.5852,,0.5297,,1
+DAGMM,logs,0.7131,,0.8922,,0.7926,,0.9078,,0.873,,1

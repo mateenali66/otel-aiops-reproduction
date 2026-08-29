@@ -1,0 +1,6 @@
+verify-archive: recomputed from /Users/mateen/mateen/phd/papers/paper5-opentelemetry-aiops/reproduction/data/zenodo/otel-aiops-benchmark/data/results
+  metric_reconciliation.csv (Table 12 support, 24 rows): match
+  table4_single_signal.csv (Table 4, 24 rows): match
+  below_chance.json: ['CNN1D_AE', 'LSTM_AE', 'LSTM_VAE'] = 3/8 (37.5%) match
+  friedman_ranking.csv (24 rows): match
+RESULT: PASS

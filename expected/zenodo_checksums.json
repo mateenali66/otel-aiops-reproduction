@@ -1,0 +1,19 @@
+{
+  "doi": "10.5281/zenodo.22078287",
+  "record": "22078287",
+  "record_version": "v3.1.3",
+  "api": "https://zenodo.org/api/records/22078287",
+  "files": {
+    "otel-aiops-benchmark.zip": {
+      "size": 62897450,
+      "md5": "ef2cd3b74b17d7984e56fe09b10684eb",
+      "url": "https://zenodo.org/api/records/22078287/files/otel-aiops-benchmark.zip/content"
+    },
+    "paper5_external_validity_code_v3.1.1.zip": {
+      "size": 21225,
+      "md5": "389d2c44188afecd0cb427879858f2a0",
+      "url": "https://zenodo.org/api/records/22078287/files/paper5_external_validity_code_v3.1.1.zip/content",
+      "note": "external-validity (RCAEval) code, Table 16; not used by this package"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "rule": "mean AUC-ROC across folds below 0.5 on every evaluated signal (FDES section 8a)",
+  "n_models_evaluated": 8,
+  "n_signals_evaluated": 3,
+  "models_below_chance": [
+    "CNN1D_AE",
+    "LSTM_AE",
+    "LSTM_VAE"
+  ],
+  "n_below_chance": 3,
+  "fraction_below_chance": 0.375
+}
