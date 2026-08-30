@@ -10,5 +10,5 @@ Verdict: **PASS**
 | Flag-everything guard | 8b | recall = 0.742, predicted rate = 0.616 | F1 within 5% of floor and recall >= 0.95 | pass |
 | Degenerate (article Table 12 rule) | 8 | AUC <= 0.55 and F1 >= 0.95 x floor | | not degenerate |
 
-Threshold selected on validation repetition [10] (section 5 step 2); test repetitions [1, 2]; seed 43 (base 42 + fold).
-Windows evaluated (cooldown excluded): 10449. Fit time: 0.13 s.
+The threshold was selected on validation repetition [10] (section 5 step 2). Test repetitions were [1, 2]. The seed was 43 (base 42 + fold).
+10449 windows were evaluated with cooldown excluded. Fitting took 0.14 s.

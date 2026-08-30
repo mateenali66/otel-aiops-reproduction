@@ -181,8 +181,8 @@ def render_report(r: dict) -> str:
         f"| Degenerate (article Table 12 rule) | 8 | AUC <= 0.55 and F1 >= 0.95 x floor | | "
         f"{'degenerate' if c['degenerate_table12_rule'] else 'not degenerate'} |",
         "",
-        f"Threshold selected on validation repetition {r['fold_assignment']['val']} (section 5 step 2); "
-        f"test repetitions {r['fold_assignment']['test']}; seed {r['seed']} (base 42 + fold).",
-        f"Windows evaluated (cooldown excluded): {r['n_test_windows_evaluated']}. Fit time: {r['fit_seconds']} s.",
+        f"The threshold was selected on validation repetition {r['fold_assignment']['val']} (section 5 step 2). "
+        f"Test repetitions were {r['fold_assignment']['test']}. The seed was {r['seed']} (base 42 + fold).",
+        f"{r['n_test_windows_evaluated']} windows were evaluated with cooldown excluded. Fitting took {r['fit_seconds']} s.",
     ]
     return "\n".join(lines) + "\n"
