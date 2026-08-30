@@ -1,7 +1,8 @@
 cff-version: 1.2.0
 message: >-
   If you use this reproduction package, cite the IEEE Access article and the Zenodo
-  artifact it reproduces.
+  artifact it reproduces. The package itself is archived at DOI 10.5281/zenodo.22170202
+  (concept DOI 10.5281/zenodo.22170201).
 type: software
 title: >-
   Reproduction package for "Evaluating ML-Based Anomaly Detection on Unified
@@ -11,6 +12,9 @@ authors:
     given-names: Mateen Ali
     orcid: https://orcid.org/0009-0001-7231-8515
     affiliation: Phono Technologies Inc.
+version: 1.0.0
+date-released: "2026-08-30"
+doi: 10.5281/zenodo.22170202
 license: Apache-2.0
 repository-code: "https://github.com/mateenali66/otel-aiops-reproduction"
 keywords:
