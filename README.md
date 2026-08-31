@@ -67,7 +67,7 @@ budget control, table building, verification, the FDES checks and the detector p
 | `tables/table5_fusion.csv` | Table 5 late fusion, Figures 4 and 5 (needs a run with 2+ signals) | `fdes/tables.py` from `results/fusion_results.csv` |
 | `tables/table7_per_fault_recall.csv` | Table 7 per-fault recall, Figure 6 | `fdes/tables.py` from `results/per_fault_type_results.csv` |
 | `tables/table8_training_time.csv` | Table 8, Figure 7 (times will reflect your CPU) | `fdes/tables.py` |
-| `tables/below_chance.json` | the "three of eight" (37.5 percent) figure, models with mean AUC-ROC below 0.5 on every signal (Section V-B, FDES section 8) | `fdes/checks.py` |
+| `tables/below_chance.json` | the three-of-eight (37.5 percent) figure, models with mean AUC-ROC below 0.5 on every signal (Section V-B, FDES section 8) | `fdes/checks.py` |
 | `tables/fdes_checks.csv` | FDES sections 7 and 8 per (model, signal, fold), covering predict-all floor, AUC vs 0.5, flag-everything guard, Table 12 degenerate rule | `fdes/checks.py` |
 | `tables/friedman_ranking.csv` | Friedman ranks per signal (Section V-C, needs 3+ folds and fusion results) | artifact `significance_tests.py` |
 | `results/optuna_results.csv` | Table 3 search spaces, selected hyperparameters | artifact `training.py` |
@@ -75,7 +75,7 @@ budget control, table building, verification, the FDES checks and the detector p
 | `out/pilot/<detector>_<signal>_fold<k>/pilot_report.md` | FDES verdict for your own detector | `fdes/protocol.py` |
 
 Figures 2 to 7 are regenerated from the CSVs above with the artifact's `code/figures/*.py`
-(matplotlib and seaborn are pinned for that purpose). Figures 8 to 16 (feature importance,
+(matplotlib and seaborn are pinned for that purpose). Figures 8 to 15 (feature importance,
 separability and training-dynamics diagnostics) come from `code/pipeline/ae_diagnostics.py`
 and `code/analysis/supervised_baseline.py`, which are not wrapped here.
 
@@ -115,7 +115,8 @@ Smoke mode writes to `out/smoke` and checks two things.
   at 30). It is checked for presence and finite metrics and passed through the FDES checks.
   It is not compared numerically, because a reduced search can't be expected to land on the
   published number. The recorded venv run gave F1 0.793 and AUC-ROC 0.908. The container run
-  on the same machine gave F1 0.806 and AUC-ROC 0.908. The archived 25-trial values are 0.877
+  on the same machine gave F1 0.806 and AUC-ROC 0.908 (recorded under
+  `runs/2026-08-29-smoke-m4pro/docker/`). The archived 25-trial values are 0.877
   and 0.939. The two classical rows were identical to four decimals in both environments.
 
 The recorded smoke run (`runs/2026-08-29-smoke-m4pro/`) matched both classical rows to four
@@ -145,8 +146,8 @@ torch 2.5.1, with the venv route.
 | Target | Wall clock | Notes |
 |---|---|---|
 | `make fetch` | 34 s | 63 MB download plus md5 and unzip |
-| `make smoke` | 151 s (2.5 min) | logs signal, fold 1. The two classical models take 12 s, the reduced-budget DAGMM the rest |
-| `make docker-smoke` (smoke inside the container) | 239 s (4.0 min) | same machine, arm64 image, verify PASS |
+| `make smoke` | 150.4 s (2.5 min) | logs signal, fold 1. The two classical models take 10.6 s, the reduced-budget DAGMM the rest |
+| `make docker-smoke` (smoke inside the container) | 238.7 s (4.0 min) | same machine, arm64 image, verify PASS, record in `runs/2026-08-29-smoke-m4pro/docker/` |
 | `make verify` | under 2 s | |
 | `make verify-archive` | 2 s | |
 | `make pilot` | 2 s | example Isolation Forest plugin |
@@ -155,7 +156,7 @@ torch 2.5.1, with the venv route.
 The full run was not executed here. The artifact records 41.8 hours of training time
 (Optuna search plus final fit, summed over all 120 model-signal-fold cells) on the article's
 SageMaker instances, with the deep models on NVIDIA A10G GPUs. The metrics signal (532k rows,
-64 features) accounts for 19.9 of those hours.
+64 features) accounts for 27.1 of those hours.
 
 On a laptop CPU the classical models finish in minutes per signal, and the deep models run
 several times slower than on the GPU. `make reproduce` prints a working estimate of 2 to 5 days
@@ -184,10 +185,10 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 | Threshold-independent metrics from both families (AUC-ROC, PR-AUC) with random references (0.5, p) | 6, 7 | `fdes/checks.py::check_row` |
 | Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
 | Flag-everything guard: F1 within 5 percent of the floor with recall at or above 0.95 | 8b | `sec8b_flag_everything` |
-| Degenerate-detector rule used in the article (AUC <= 0.55 and F1 >= 0.95 x floor) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
+| Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
 | Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | artifact `training.py`, and `fdes/protocol.py` for pilots |
 | Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
-| Episode-level detection | 5 (step 6) | artifact `training.py::evaluate_episode_detection` (`results/episode_results.csv`) |
+| Episode-level detection rate. Step 6's detection-latency distribution is not implemented, here or in the artifact | 5 (step 6, in part) | artifact `training.py::evaluate_episode_detection` (`results/episode_results.csv`) |
 | Published seed policy, per-fold results, regeneration from archived scores | 9 | this README, `expected/model_results_per_fold.csv`, `make verify-archive` |
 
 The 5 percent margin in the section 8b check is this package's choice of "the evaluator's
@@ -255,9 +256,9 @@ data/, out/             created by fetch and the runs; git-ignored
 
 ## License
 
-The wrapper code in this repository (`bin/`, `fdes/`, `detectors/`, `Makefile`, `Dockerfile`)
-is Apache-2.0. The Zenodo artifact fetched into `data/` and the derived tables in `expected/`
-are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `LICENSE`.
+The wrapper code and packaging in this repository (`bin/`, `fdes/`, `detectors/`, `Makefile`,
+`Dockerfile`, `requirements.txt`, `CITATION.cff` and this README) are Apache-2.0. The Zenodo
+artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `LICENSE`.
 
 ## Citation
 
@@ -294,7 +295,7 @@ are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `L
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.22170202](https://doi.org/10.5281/zenodo.22170202) (v1.0.0; concept DOI
+[10.5281/zenodo.22170202](https://doi.org/10.5281/zenodo.22170202) (v1.0.0, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,
