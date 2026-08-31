@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+IsolationForest,logs,0.4755,0.742,0.5796,0.6355,0.5321,0.5752,4124,6435,10449,5.59,1,0.08,"{'n_estimators': 100, 'contamination': 0.03183923284706837, 'max_features': 0.5290418060840998, 'max_samples': 0.9330880728874675}"
+OneClassSVM,logs,0.3981,0.9748,0.5654,0.5852,0.5297,0.4085,4124,10097,10449,4.75,1,0.03,"{'kernel': 'rbf', 'nu': 0.044846856872152424, 'gamma': 'auto'}"
+DAGMM,logs,0.799,0.8128,0.8059,0.9079,0.8911,0.8458,4109,4180,10434,224.32,1,0.59,"{'hidden_dim': 64, 'n_layers': 2, 'latent_dim': 4, 'n_gmm': 2, 'lr': 0.00010994335574766199, 'dropout': 0.48495492608099716, 'lambda_energy': 0.33994812107955635, 'lambda_cov_diag': 0.0016305687346221474, 'epochs': 40}"

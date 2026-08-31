@@ -1,0 +1,141 @@
+{
+  "label": "smoke",
+  "signal": "logs",
+  "fold": 1,
+  "published_budget_models": [
+    "IsolationForest",
+    "OneClassSVM"
+  ],
+  "reduced_budget_models": [
+    "DAGMM"
+  ],
+  "n_trials_deep_reduced": 2,
+  "max_epochs_deep_reduced": 30,
+  "wall_clock_s": 237.8,
+  "hardware": {
+    "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "python": "3.11.16",
+    "cpu_count": 12,
+    "torch": "2.5.1",
+    "torch_threads": 8
+  },
+  "tables": {
+    "written": [
+      "table4_single_signal.csv",
+      "table8_training_time.csv",
+      "below_chance.json",
+      "fdes_checks.csv",
+      "table7_per_fault_recall.csv"
+    ],
+    "skipped": [
+      "table5_fusion.csv (needs >= 2 signals in one run)",
+      "friedman_ranking.csv (needs >= 3 folds, >= 2 models and fusion results; run has 1 fold(s), 3 model(s))"
+    ]
+  },
+  "parts": [
+    {
+      "label": "smoke-classical",
+      "signals": [
+        "logs"
+      ],
+      "models": [
+        "IsolationForest",
+        "OneClassSVM"
+      ],
+      "folds": [
+        1
+      ],
+      "n_trials_classical": 10,
+      "n_trials_deep": 25,
+      "max_epochs_deep": null,
+      "wall_clock_s": 10.5,
+      "seed_policy": "base 42 + fold id (random, numpy, torch); Optuna TPESampler seed 42; IsolationForest random_state 42",
+      "device": "cpu",
+      "hardware": {
+        "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.41",
+        "machine": "aarch64",
+        "python": "3.11.16",
+        "cpu_count": 12,
+        "torch": "2.5.1",
+        "torch_threads": 8
+      },
+      "env": {
+        "PAPER5_INCLUDE_SIGNALS": "logs",
+        "PAPER5_INCLUDE_MODELS": "IsolationForest,OneClassSVM",
+        "PAPER5_N_TRIALS_CLASSICAL": "10",
+        "PAPER5_N_TRIALS_DEEP": "25",
+        "PAPER5_SIGNAL_WORKERS": "1"
+      },
+      "artifact": {
+        "doi": "10.5281/zenodo.22078287",
+        "file": "otel-aiops-benchmark.zip",
+        "md5": "ef2cd3b74b17d7984e56fe09b10684eb"
+      },
+      "tables": {
+        "written": [
+          "table4_single_signal.csv",
+          "table8_training_time.csv",
+          "below_chance.json",
+          "fdes_checks.csv",
+          "table7_per_fault_recall.csv"
+        ],
+        "skipped": [
+          "table5_fusion.csv (needs >= 2 signals in one run)",
+          "friedman_ranking.csv (needs >= 3 folds, >= 2 models and fusion results; run has 1 fold(s), 2 model(s))"
+        ]
+      }
+    },
+    {
+      "label": "smoke-deep",
+      "signals": [
+        "logs"
+      ],
+      "models": [
+        "DAGMM"
+      ],
+      "folds": [
+        1
+      ],
+      "n_trials_classical": 10,
+      "n_trials_deep": 2,
+      "max_epochs_deep": 30,
+      "wall_clock_s": 224.4,
+      "seed_policy": "base 42 + fold id (random, numpy, torch); Optuna TPESampler seed 42; IsolationForest random_state 42",
+      "device": "cpu",
+      "hardware": {
+        "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.41",
+        "machine": "aarch64",
+        "python": "3.11.16",
+        "cpu_count": 12,
+        "torch": "2.5.1",
+        "torch_threads": 8
+      },
+      "env": {
+        "PAPER5_INCLUDE_SIGNALS": "logs",
+        "PAPER5_INCLUDE_MODELS": "DAGMM",
+        "PAPER5_N_TRIALS_CLASSICAL": "10",
+        "PAPER5_N_TRIALS_DEEP": "2",
+        "PAPER5_SIGNAL_WORKERS": "1"
+      },
+      "artifact": {
+        "doi": "10.5281/zenodo.22078287",
+        "file": "otel-aiops-benchmark.zip",
+        "md5": "ef2cd3b74b17d7984e56fe09b10684eb"
+      },
+      "tables": {
+        "written": [
+          "table4_single_signal.csv",
+          "table8_training_time.csv",
+          "below_chance.json",
+          "fdes_checks.csv",
+          "table7_per_fault_recall.csv"
+        ],
+        "skipped": [
+          "table5_fusion.csv (needs >= 2 signals in one run)",
+          "friedman_ranking.csv (needs >= 3 folds, >= 2 models and fusion results; run has 1 fold(s), 1 model(s))"
+        ]
+      }
+    }
+  ]
+}
