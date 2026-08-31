@@ -58,6 +58,17 @@ def build_tables(results_dir: Path, tables_dir: Path, artifact_code_dir: Path | 
     checks_from_model_results(mr).to_csv(tables_dir / "fdes_checks.csv", index=False)
     manifest["written"].append("fdes_checks.csv")
 
+    # VUS-PR and VUS-ROC need the raw score vectors, so this table is skipped when a run
+    # kept only the aggregated CSVs. Raw scores include cooldown windows (see fdes/vus.py).
+    rs = results_dir / "raw_scores"
+    if rs.exists() and any(rs.glob("*_scores.npy")):
+        from .vus import vus_table_from_raw_scores
+        vt = vus_table_from_raw_scores(rs)
+        vt.to_csv(tables_dir / "vus.csv", index=False)
+        manifest["written"].append("vus.csv")
+    else:
+        manifest["skipped"].append("vus.csv (needs results/raw_scores/*.npy)")
+
     # Table 7 (per-fault recall, traces) straight from the pipeline's per-fault output
     pf = results_dir / "per_fault_type_results.csv"
     if pf.exists():

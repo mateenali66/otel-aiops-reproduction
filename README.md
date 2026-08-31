@@ -183,6 +183,7 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 |---|---|---|
 | Predict-all baseline F1 = 2p/(1+p) reported next to every operating-point score | 2, 7 | `fdes/checks.py::predict_all_f1`, `tables/fdes_checks.csv` |
 | Threshold-independent metrics from both families (AUC-ROC, PR-AUC) with random references (0.5, p) | 6, 7 | `fdes/checks.py::check_row` |
+| Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | `fdes/vus.py`, `tables/vus.csv`, pilot report |
 | Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
 | Flag-everything guard: F1 within 5 percent of the floor with recall at or above 0.95 | 8b | `sec8b_flag_everything` |
 | Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
@@ -193,6 +194,16 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 
 The 5 percent margin in the section 8b check is this package's choice of "the evaluator's
 stated margin". Change `FLOOR_MARGIN` in `fdes/checks.py` to use your own.
+
+`fdes/vus.py` is a port of the VUS reference implementation from TSB-AD
+(https://github.com/TheDatumOrg/TSB-AD, Apache-2.0), the implementation of Paparrizos et
+al., PVLDB 15(11), 2022, https://doi.org/10.14778/3551793.3551830, and matches it to float
+precision on the archived score vectors. The buffer defaults to the median labeled
+anomaly-segment length capped at 100 windows, the reference implementation's own
+`get_metrics` default, and the value used is reported in every output row. `tables/vus.csv`
+is computed from `results/raw_scores/`, which includes cooldown windows, so its values are
+cooldown-included. The pilot report's VUS row is computed on the same cooldown-excluded
+vector as the other pilot metrics.
 
 ## Run against your own detector
 
@@ -246,7 +257,8 @@ bin/reproduce.py        single entry point (fetch, smoke, reproduce, verify, ver
 bin/build_expected.py   regenerates expected/ from the fetched artifact
 fdes/checks.py          FDES section 2, 6, 7, 8 checks
 fdes/protocol.py        FDES section 5 procedure for pilots (reuses the artifact's split, cooldown, threshold and metric code)
-fdes/tables.py          Table 4, 5, 7, 8, below-chance, Friedman
+fdes/tables.py          Table 4, 5, 7, 8, below-chance, Friedman, VUS
+fdes/vus.py             VUS-PR and VUS-ROC, ported from the TSB-AD reference implementation
 detectors/base.py       plugin interface; detectors/example_isolation_forest.py
 expected/               archived values verify compares against
 runs/                   recorded runs: manifest, verify reports, tables (evidence, not inputs)

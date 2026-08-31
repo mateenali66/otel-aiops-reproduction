@@ -84,6 +84,11 @@ def checks_from_scores(y: np.ndarray, scores: np.ndarray, threshold: float) -> d
     out = check_row(p, f1, recall, auc, ap)
     out["mean_predicted_rate"] = round(float(preds.mean()), 4)
     out["pr_lift_normalized"] = round((ap - p) / (1 - p), 4) if (1 - p) > 0 else None
+    from .vus import vus_from_scores
+    v = vus_from_scores(y, s)
+    out["vus_pr"] = round(v["vus_pr"], 4)
+    out["vus_roc"] = round(v["vus_roc"], 4)
+    out["vus_buffer"] = v["vus_buffer"]
     return out
 
 
