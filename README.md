@@ -299,15 +299,15 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.0.0},
+  version   = {1.1.0},
   publisher = {Zenodo},
   year      = {2026},
-  doi       = {10.5281/zenodo.22170202}
+  doi       = {10.5281/zenodo.22185619}
 }
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.22170202](https://doi.org/10.5281/zenodo.22170202) (v1.0.0, concept DOI
+[10.5281/zenodo.22185619](https://doi.org/10.5281/zenodo.22185619) (v1.1.0, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,
