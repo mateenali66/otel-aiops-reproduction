@@ -176,6 +176,8 @@ def render_report(r: dict) -> str:
         f"{'EXCLUDE' if c['sec8a_auc_at_or_below_random'] else 'pass'} |",
         f"| Threshold-independent (PR) | 6, 7 | PR-AUC = {m['pr_auc']:.3f} | p = {c['pr_random_reference']:.3f} | "
         f"normalised lift = {c['pr_lift_normalized']} |",
+        f"| Range-based (VUS) | 6 | VUS-PR = {c['vus_pr']:.3f}, VUS-ROC = {c['vus_roc']:.3f} | "
+        f"buffer = {c['vus_buffer']} windows | reported |",
         f"| Flag-everything guard | 8b | recall = {m['recall']:.3f}, predicted rate = {c['mean_predicted_rate']:.3f} | "
         f"F1 within 5% of floor and recall >= 0.95 | {'EXCLUDE' if c['sec8b_flag_everything'] else 'pass'} |",
         f"| Degenerate (article Table 12 rule) | 8 | AUC <= 0.55 and F1 >= 0.95 x floor | | "
