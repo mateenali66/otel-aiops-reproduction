@@ -1,5 +1,5 @@
 # Reproduction package for "Evaluating ML-Based Anomaly Detection on Unified OpenTelemetry
-# Signals" (IEEE Access, 10.1109/ACCESS.2026.3705430), implementing FDES v1.0.0-draft.
+# Telemetry" (IEEE Access, 10.1109/ACCESS.2026.3705430), implementing FDES v1.0.0-draft.
 #
 #   make fetch          download Zenodo 10.5281/zenodo.22078287 and verify the md5
 #   make smoke          one signal, one fold, minutes on a laptop CPU
