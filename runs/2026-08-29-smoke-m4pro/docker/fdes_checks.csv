@@ -1,0 +1,4 @@
+model,signal_type,fold,prevalence,f1_predict_all,f1_score,f1_minus_floor,recall,auc_roc,auc_random_reference,pr_auc,pr_random_reference,sec8a_auc_at_or_below_random,sec8b_flag_everything,degenerate_table12_rule,fdes_verdict
+IsolationForest,logs,1,0.3947,0.566,0.5796,0.0136,0.742,0.6355,0.5,0.5321,0.3947,False,False,False,PASS
+OneClassSVM,logs,1,0.3947,0.566,0.5654,-0.0006,0.9748,0.5852,0.5,0.5297,0.3947,False,True,False,EXCLUDE
+DAGMM,logs,1,0.3938,0.5651,0.8059,0.2408,0.8128,0.9079,0.5,0.8911,0.3938,False,False,False,PASS

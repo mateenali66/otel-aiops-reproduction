@@ -1,0 +1,10 @@
+Container smoke run, 2026-08-29, same Apple M4 Pro as the venv record one level up.
+
+The run was `make docker-smoke` on the arm64 image (python:3.11-slim pinned by digest).
+The outer `time` measurement was real 238.72 s. The inner run_manifest.json in this
+directory records wall_clock_s 237.8 inside the container (Linux 6.10.14-linuxkit
+aarch64, Python 3.11.16, torch 2.5.1, 12 CPUs).
+
+verify passed with 0 mismatches (verify_report.txt). DAGMM at the reduced budget
+scored F1 0.8059 and AUC-ROC 0.9079 (model_results.csv). The IsolationForest and
+OneClassSVM rows match the venv record one level up to four decimals.
