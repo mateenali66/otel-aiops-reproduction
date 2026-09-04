@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.3.9] - 2026-09-04
+
+Eight rounds in, and the eighth found three more, one of them a false sentence introduced by
+the release that fixed two false sentences.
+
+### Fixed
+
+- **Nothing could pass where nothing could fail.** Above a prevalence of 0.5 the
+  flag-everything guard's bar exceeds an alerted rate of 1.0 and cannot fire. Section 8b
+  needs recall at or above 0.95. Alerts mode has no rank metric, so section 8a cannot fire
+  either. And the predict-all floor reaches 0.92 at a prevalence of 0.853, so F1 barely
+  separates a working detector from one that alerts on everything. A detector alerting on 88
+  percent of the timeline came back PASS at exit 0 with not one check firing. That is not a
+  detector that passed, it is an input that cannot produce a verdict, and it is now reported
+  as INSUFFICIENT.
+
+  Two conditions, and both are needed. Prevalence alone was too blunt: a perfect detector at
+  a prevalence of 0.6 scores a third above the floor, which is a real measurement, and it
+  keeps its PASS. The verdict is withheld only when the guard is structurally unreachable
+  AND the detector sits inside the near-floor band, which is where F1 has stopped
+  discriminating. An EXCLUDE still stands either way, because a check firing is evidence.
+
+- **The duplicate notice stated something false.** It said the alerted rate and the alerts
+  per incident are both multiplied by duplication. The alerted rate is not. Occupancy is a
+  union, so duplicate windows claim buckets that were already claimed, and the alerted rate
+  is identical at every multiplicity. Only the alerts per incident moves. Introduced in
+  1.3.8, which was the release that fixed two other false sentences.
+
+- **One second of jitter defeated duplicate detection entirely.** Real delivery fan-out does
+  not produce identical timestamps, it produces copies a second or two apart. Exact-pair
+  matching caught only the synthetic case, while the jittered one did identical damage in
+  silence: 744 rows, zero duplicates reported, alerts per incident inflated fourfold. The
+  check now also compares the row count against the number of separate stretches those rows
+  cover, since repeated deliveries of one alert collapse into one stretch however they are
+  jittered. Reported with weaker language than exact duplication, because a genuinely bursty
+  detector makes the same shape and this tool cannot tell them apart.
+
+- **Sharing a bucket was reported as overlapping in time.** Twelve incident rows sitting 1500
+  seconds apart were described as overlapping, with half the window time said to have sat
+  under another window and been absorbed. No two of them touch at any point. They collide
+  only inside an hourly bucket. That is bucket occupancy reported as a temporal property of
+  the file, which is the same root cause as the quantisation defect fixed in 1.3.2. Overlap
+  is now measured on the raw times, and when windows share buckets without touching the
+  notice says exactly that, says it is a property of the chosen bucket size, and says a finer
+  bucket separates them. Genuine overlap now also reports the overlapping seconds before any
+  bucket is applied.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. All six bundled examples keep their documented exit codes.
+231 tests pass.
+
 ## [1.3.8] - 2026-09-04
 
 A fourth production stack, this one on Cloudflare with an unusual shape: a prevalence of
