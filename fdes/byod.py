@@ -260,18 +260,17 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
         raise InputError(f"{path}: {backwards} row(s) end before they start. "
                          f"Check the '{s_name}' and '{e_name}' columns.")
 
-    # A window that ends the same second it starts covers no time. It is the same class of
-    # export problem as one that ends before it starts, so it gets the same answer instead
-    # of being marked onto one bucket in silence. Point events are not affected, because
-    # they have no end column to disagree with.
-    if not point_events:
-        empty = int((ends == starts).sum())
-        if empty:
-            raise InputError(
-                f"{path}: {empty} row(s) end at the same second they start, so they cover "
-                f"no time. Check the '{s_name}' and '{e_name}' columns. If these really are "
-                f"instantaneous events, export them with a start column only and every row "
-                f"is read as a point event covering one bucket.")
+    # A window that ends the same second it starts is an instantaneous event, not a broken
+    # row. Real exports carry them: a Datadog Watchdog story that emitted a single event
+    # has one timestamp, so start equals end. These are marked onto the one bucket that
+    # contains them, which is what mark_windows already does.
+    #
+    # This is deliberately NOT treated like a row that ends before it starts. That one is
+    # impossible and means the columns are wrong. A zero-length row is possible and means
+    # the event was instantaneous. An earlier version refused both, which rejected real
+    # vendor exports outright and offered a remedy, dropping the end column, that would
+    # have turned every other row into a point event too.
+    zero_length = int((ends == starts).sum()) if not point_events else 0
 
     sev_name = pick_column(df, SEVERITY_COLS, None, "severity", path, required=False)
     severities = {}
@@ -295,6 +294,7 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
         "start_column": s_name,
         "end_column": e_name,
         "point_events": point_events,
+        "zero_length_rows": zero_length,
         "start_timestamps": s_note,
         "end_timestamps": e_note,
         "severity_column": sev_name,
@@ -1209,6 +1209,13 @@ def timestamp_assumptions(notes: list[dict], bucket_s: int) -> list[str]:
             out.append(f"{n['file']} has a start column but no end column, so every row was "
                        f"read as a point event covering one {bucket_s} s bucket. If your "
                        f"windows do have an end, name its column with --end-col.")
+        if n.get("zero_length_rows"):
+            z = n["zero_length_rows"]
+            out.append(f"{n['file']}: {z} row(s) start and end at the same second. Those are "
+                       f"instantaneous events and each marks the one bucket that contains "
+                       f"it. That is not an error. Real exports carry them, for example a "
+                       f"Watchdog story that emitted a single event. If you expected those "
+                       f"rows to cover a span, the export lost the end time.")
     seen, unique = set(), []
     for line in out:
         if line not in seen:
