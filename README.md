@@ -1084,7 +1084,7 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.3.2},
+  version   = {1.3.3},
   publisher = {Zenodo},
   year      = {2026},
   doi       = {10.5281/zenodo.22309755}
