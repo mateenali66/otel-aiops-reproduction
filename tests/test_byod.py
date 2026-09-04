@@ -742,6 +742,126 @@ class TestAlertRateCurve(TempCase):
             self.assertIn(code, flat)
         self.assertIn("PASS, but something was held back", flat)
 
+    def high_prevalence(self, incident_days: float, alert_days: float):
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        incidents = write(self.tmp, f"hp_i_{incident_days}.csv",
+                          f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(days=incident_days))}\n")
+        alerts = write(self.tmp, f"hp_a_{alert_days}.csv",
+                       f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(days=alert_days))}\n")
+        return byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                                 sweep=False)
+
+    def test_nothing_can_pass_where_nothing_can_fail(self):
+        # Above a prevalence of 0.5 the guard bar exceeds an alerted rate of 1.0 and cannot
+        # fire, section 8b needs recall at or above 0.95, and alerts mode has no rank metric.
+        # A detector alerting on 88 percent of the timeline came back PASS at exit 0 with not
+        # one check firing. That is an input that cannot produce a verdict, not a pass.
+        r = self.high_prevalence(25.6, 26.4)
+        res = r["results"]
+        self.assertGreater(res["prevalence"], 0.5)
+        self.assertTrue(res["alert_rate_bar_unreachable"])
+        self.assertTrue(res["near_floor"])
+        self.assertEqual([k for k, v in res["checks"].items() if v], [])
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertIn("Nothing here is capable of failing this detector",
+                      json.dumps(r["not_computed"]))
+
+    def test_a_detector_well_clear_of_the_floor_still_passes_at_high_prevalence(self):
+        # The condition needs both halves. Prevalence alone is too blunt: a perfect detector
+        # at a prevalence of 0.6 scores a third above the floor, which is a real measurement,
+        # and it must keep its PASS even though the guard is unreachable there too.
+        r = self.high_prevalence(18, 18)
+        res = r["results"]
+        self.assertTrue(res["alert_rate_bar_unreachable"])
+        self.assertFalse(res["near_floor"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_the_duplicate_notice_does_not_claim_the_alerted_rate_is_multiplied(self):
+        # It said "the alerted rate and the alerts per incident are both multiplied by it".
+        # The alerted rate is not. Occupancy is a union and duplicate windows claim buckets
+        # that were already claimed. Measured: identical alerted rate at every multiplicity.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        base = [(t0 + _dt.timedelta(hours=2 * k), t0 + _dt.timedelta(hours=2 * k, minutes=5))
+                for k in range(10)]
+        rates = []
+        for copies in (1, 4):
+            rows = [r for r in base for _ in range(copies)]
+            alerts = write(self.tmp, f"dupn_{copies}.csv",
+                           "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in rows))
+            r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                                  sweep=False)
+            rates.append(r["results"]["degenerate_output"]["alerted_rate"])
+            if copies == 4:
+                report = byod.render_report(r)
+                self.assertIn("The alerted rate is NOT affected", report)
+                self.assertNotIn("alerts per incident\nare both multiplied", report)
+        self.assertEqual(rates[0], rates[1], "duplicates changed the alerted rate")
+
+    def test_one_second_of_jitter_does_not_defeat_duplicate_detection(self):
+        # Real delivery fan-out does not produce identical timestamps, it produces copies a
+        # second or two apart. Exact-pair matching caught only the synthetic case while the
+        # jittered one did identical damage in silence.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        base = [(t0 + _dt.timedelta(hours=2 * k), t0 + _dt.timedelta(hours=2 * k, minutes=5))
+                for k in range(10)]
+        jittered = [(a + _dt.timedelta(seconds=j), b + _dt.timedelta(seconds=j))
+                    for a, b in base for j in range(4)]
+        alerts = write(self.tmp, "jitter_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in jittered))
+        r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              sweep=False)
+        d = r["results"]["alert_duplicates"]
+        self.assertEqual(d["duplicate_rows"], 0, "no two rows share an exact pair")
+        self.assertEqual(d["merged_stretches"], 10)
+        self.assertEqual(d["rows_per_stretch"], 4.0)
+        self.assertTrue(d["repeats_suspected"])
+        report = byod.render_report(r)
+        self.assertIn("Repeated alert rows, probably", report)
+        self.assertIn("not exact duplication", report)
+        # A clean export must still say nothing.
+        clean = write(self.tmp, "jitter_clean.csv",
+                      "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in base))
+        c = byod.check_alerts(clean, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              sweep=False)
+        self.assertFalse(c["results"]["alert_duplicates"]["repeats_suspected"])
+        self.assertNotIn("Repeated alert rows", byod.render_report(c))
+
+    def test_sharing_a_bucket_is_not_called_overlapping_in_time(self):
+        # Twelve incident rows 1500 seconds apart were described as overlapping, with half
+        # the window time said to have sat under another window and been absorbed. No two of
+        # them touch. They collide inside an hourly bucket, which is a property of the bucket
+        # size rather than of the file.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = []
+        for k in range(6):
+            base = t0 + _dt.timedelta(days=4 * k + 2)
+            inc.append((base, base + _dt.timedelta(minutes=5)))
+            second = base + _dt.timedelta(seconds=1800)
+            inc.append((second, second + _dt.timedelta(minutes=5)))
+        incidents = write(self.tmp, "bkt_i.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "bkt_a.csv",
+                       f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(minutes=5))}\n")
+        r = byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                              sweep=False)
+        raw = r["coverage"]["incidents"]["raw_overlap"]
+        self.assertEqual(raw["overlap_seconds"], 0)
+        self.assertFalse(raw["windows_truly_overlap"])
+        report = byod.render_report(r)
+        self.assertIn("do not overlap in time at all, and they still share buckets", report)
+        self.assertIn("property of the bucket size you chose, not of the file", report)
+        self.assertNotIn("sat under another window", report)
+
     def test_the_denominator_does_not_move_with_the_bucket_you_picked(self):
         # The first version of the merge used the bucket size as its gap tolerance, on the
         # reasoning that the caller had already chosen that number. That made a count of

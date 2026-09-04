@@ -541,6 +541,40 @@ def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.n
                     "overlap_fraction": round(absorbed / span_buckets, 4) if span_buckets else 0.0}
 
 
+def raw_overlap(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
+    """Whether these windows actually overlap in time, as opposed to sharing a bucket.
+
+    The bucket-level figure could not tell those apart, and reported the second as the
+    first. Twelve incident rows sitting 1500 seconds apart were described as overlapping,
+    with half the window time said to have sat under another window and been absorbed, when
+    no two of them touched at any point. They only collided inside an hourly bucket. That is
+    bucket occupancy reported as a temporal property of the file, which is the same root
+    cause as the quantisation defect fixed in 1.3.2.
+    """
+    lo, hi = int(grid["t_from"]), int(grid["t_to"])
+    a = np.clip(np.asarray(starts, dtype=np.int64), lo, hi)
+    b = np.clip(np.asarray(ends, dtype=np.int64), lo, hi)
+    keep = b > a
+    a, b = a[keep], b[keep]
+    if not len(a):
+        return {"sum_seconds": 0, "union_seconds": 0, "overlap_seconds": 0,
+                "windows_truly_overlap": False}
+    order = np.argsort(a, kind="stable")
+    a, b = a[order], b[order]
+    total = int((b - a).sum())
+    union, cur_a, cur_b = 0, a[0], b[0]
+    for x, y_ in zip(a[1:], b[1:]):
+        if x <= cur_b:
+            cur_b = max(cur_b, y_)
+        else:
+            union += cur_b - cur_a
+            cur_a, cur_b = x, y_
+    union += cur_b - cur_a
+    return {"sum_seconds": total, "union_seconds": int(union),
+            "overlap_seconds": int(total - union),
+            "windows_truly_overlap": bool(total > union)}
+
+
 def count_stretches(mask: np.ndarray) -> int:
     """How many separate runs of marked buckets the mask holds after the union."""
     m = np.asarray(mask).astype(np.int8)
@@ -691,7 +725,7 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
     return float(int(a_touch.sum())) / float(incidents)
 
 
-def duplicate_rows(starts: np.ndarray, ends: np.ndarray) -> dict:
+def duplicate_rows(starts: np.ndarray, ends: np.ndarray, grid: dict | None = None) -> dict:
     """Rows sharing an identical start and end. Usually a fan-out, not a detector firing.
 
     A real Cloudflare export delivered every notification to four email recipients, so each
@@ -713,6 +747,21 @@ def duplicate_rows(starts: np.ndarray, ends: np.ndarray) -> dict:
     # A fan-out is regular. Every row repeated the same number of times, more than once.
     out["looks_like_fan_out"] = bool(len(counts) > 1 and counts.min() == counts.max()
                                      and counts.min() > 1)
+    # Exact-pair matching catches only the synthetic case. Real delivery fan-out to four
+    # recipients does not produce four identical timestamps, it produces four deliveries a
+    # second or two apart, and one second of jitter defeated the check completely while
+    # doing identical damage. So also compare the row count against the number of separate
+    # stretches those rows actually cover. Repeated deliveries of one alert collapse into one
+    # stretch however they are jittered, because they overlap.
+    if grid is not None:
+        stretches = merged_stretches(grid, starts, ends)
+        out["merged_stretches"] = stretches
+        out["rows_per_stretch"] = round(len(starts) / stretches, 2) if stretches else None
+        out["repeats_suspected"] = bool(stretches and len(starts) >= stretches * 2)
+    else:
+        out["merged_stretches"] = None
+        out["rows_per_stretch"] = None
+        out["repeats_suspected"] = False
     return out
 
 
@@ -721,17 +770,34 @@ def duplicate_notice(res: dict) -> str:
     even = (f" Every distinct alert appears exactly {d['max_multiplicity']} times, which is "
             f"the signature of a fan-out rather than of a detector repeating itself."
             if d["looks_like_fan_out"] else "")
+    if not d["duplicate_rows"]:
+        # Caught by the stretch ratio rather than by exact matching. The timestamps differ,
+        # so this is weaker evidence and it is stated as weaker.
+        return (f"Repeated alert rows, probably. {d['rows']} alert rows cover only "
+                f"{d['merged_stretches']} separate stretches of time, which is "
+                f"{d['rows_per_stretch']} rows for every stretch. No two rows share an exact "
+                f"start and end, so this is not exact duplication. It is the shape delivery "
+                f"fan-out makes when each copy arrives a second or two after the last, and "
+                f"it is also the shape a genuinely bursty detector makes. This tool cannot "
+                f"tell those apart.\n\n"
+                f"If they are deliveries, the alerts per incident above is multiplied by "
+                f"about {d['rows_per_stretch']} and any reported overlap between alert "
+                f"windows is an artefact of your distribution list. The alerted rate is not "
+                f"affected either way, because duplicate windows claim buckets that were "
+                f"already claimed. Collapse them and run this again if you can tell.")
     return (f"Duplicate alert rows. {d['rows']} alert rows carry only {d['distinct']} "
             f"distinct start and end pairs, so {d['duplicate_rows']} of them are repeats of "
             f"a row already counted.{even} The usual cause is delivery fan-out, one "
             f"notification sent to several recipients or channels, each written as its own "
             f"row with its own identifier. This tool cannot tell a fan-out from a detector "
             f"that genuinely fired twice, so it counts every row.\n\n"
-            f"That matters for two numbers above. The alerted rate and the alerts per "
-            f"incident are both multiplied by it, and so is any overlap between alert "
-            f"windows, which will read as a temporal property of the detector when it is a "
-            f"property of your distribution list. Collapse the duplicates and run this "
-            f"again if the repeats are delivery rather than detection.")
+            f"What this does and does not move. The alerts per incident is multiplied by "
+            f"it, directly. Any reported overlap between alert windows is too, and that "
+            f"will read as a temporal property of the detector when it is a property of "
+            f"your distribution list. The alerted rate is NOT affected, because it measures "
+            f"the share of buckets in an alerting state and duplicate windows claim buckets "
+            f"that were already claimed. Collapse the duplicates and run this again if the "
+            f"repeats are delivery rather than detection.")
 
 
 def implausible_prevalence_notice(res: dict, grid: dict) -> str:
@@ -1600,11 +1666,45 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # suppressed exclusion, the other a PASS on a detector paging 174 times a day, and both
     # said the same thing: the exit code carried none of it. A reader who only sees the code
     # cannot tell a clean PASS from one with a caveat attached.
+    # Above a prevalence of 0.5 in alerts mode nothing is left that can fail a detector.
+    # The alert-rate guard's bar exceeds 1.0 and is unreachable. Section 8b needs recall at
+    # or above 0.95. There is no rank metric in alerts mode at all. And the predict-all floor
+    # is so high, 0.92 at a prevalence of 0.853, that F1 carries almost no information. A
+    # detector alerting on 88 percent of the timeline came back PASS at exit 0 with not one
+    # check firing. That is not a detector that passed, it is an input that cannot produce a
+    # verdict, so it is reported as one. An EXCLUDE still stands, because something firing is
+    # evidence either way.
+    # Two conditions, and both are needed. The guard has to be structurally unreachable,
+    # which happens above a prevalence of 0.5 where its bar exceeds an alerted rate of 1.0.
+    # And the detector has to sit near the predict-all floor, because that is where F1 has
+    # stopped separating a working detector from one that alerts on everything. A perfect
+    # detector at a prevalence of 0.6 scores a third above the floor and still passes, which
+    # is right. One scoring seven percent above it at a prevalence of 0.854 does not, because
+    # at that floor seven percent is not a measurement.
+    cannot_pass = bool(mode == "alerts"
+                       and computed.get("alert_rate_bar_unreachable")
+                       and computed.get("near_floor"))
     caveat = bool(quantised or computed.get("high_alert_volume"))
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
+    elif reasons:
+        computed["verdict"] = "EXCLUDE"
+    elif cannot_pass:
+        computed["verdict"] = "INSUFFICIENT"
+        not_computed.append({
+            "metrics": ["verdict"],
+            "title": "A pass, at this prevalence, in alerts mode",
+            "reason": ("Nothing here is capable of failing this detector, so nothing here "
+                       "can pass it either. The flag-everything guard fires at an alerted "
+                       "rate above 1.0 at this prevalence, which cannot happen. Section 8b "
+                       "needs recall at or above 0.95. Alerts mode has no rank metric, so "
+                       "section 8a cannot fire. And the predict-all floor is so high that "
+                       "F1 barely separates a working detector from one that alerts on "
+                       "everything. Fix the incident file if the prevalence is wrong, which "
+                       "it usually is, or export the underlying scores and use scores mode, "
+                       "where a rank metric is available.")})
     else:
-        computed["verdict"] = "EXCLUDE" if reasons else "PASS"
+        computed["verdict"] = "PASS"
     # This is a statement about a PASS. It was set with no reference to the verdict, so
     # every EXCLUDE carried it too and anyone reading the JSON instead of the exit code read
     # an exclusion as a qualified pass.
@@ -1648,6 +1748,10 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
 
     alerted, a_span = mark_windows(grid, a_start, a_end)
     truth, i_span = mark_windows(grid, i_start, i_end)
+    # Bucket collision is not temporal overlap, and the coverage note reported the second as
+    # the first. Measure it on the raw times so the note can tell them apart.
+    a_span["raw_overlap"] = raw_overlap(grid, a_start, a_end)
+    i_span["raw_overlap"] = raw_overlap(grid, i_start, i_end)
 
     computed, not_computed = run_check(mode="alerts", y=truth, pred=alerted, scores=None,
                                       truth_rows=i_note["rows"], truth_coverage=i_span,
@@ -1661,7 +1765,7 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       / max(1e-9, float(grid["span_seconds"]) / 86400.0),
                                       stretches=merged_stretches(grid, i_start, i_end))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
-    computed["alert_duplicates"] = duplicate_rows(a_start, a_end)
+    computed["alert_duplicates"] = duplicate_rows(a_start, a_end, grid)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
         grid, i_start, i_end, computed["incident_concentration"]["long_row_indices"])
@@ -1965,12 +2069,27 @@ def merge_sentence(name: str, cov: dict) -> str:
     if not absorbed:
         verb = "does not overlap. It covers" if one else "do not overlap. They cover"
         return f"The {inside} of `{name}` inside the range {verb} {covered} in {stretches}."
-    return (f"The {inside} of `{name}` inside the range overlap. Merged, they cover "
+    raw = cov.get("raw_overlap") or {}
+    if raw and not raw.get("windows_truly_overlap"):
+        # Distinct windows landing in one bucket. Nothing overlaps in time.
+        return (f"The {inside} of `{name}` inside the range do not overlap in time at all, "
+                f"and they still share buckets. Merged, they cover {covered} in "
+                f"{stretches}. Unmerged they span "
+                f"{_plural(cov['bucket_span_before_merge'], 'bucket')}, so "
+                f"{_plural(absorbed, 'bucket')} "
+                f"({cov['overlap_fraction'] * 100:.1f} percent) is two separate windows "
+                f"falling inside one bucket rather than one window sitting under another. "
+                f"That is a property of the bucket size you chose, not of the file. A finer "
+                f"bucket separates them. The stretch count above is counted on buckets for "
+                f"the same reason, so it can differ from a count taken on the raw times.")
+    return (f"The {inside} of `{name}` inside the range overlap in time. Merged, they cover "
             f"{covered} in {stretches}. Unmerged they span "
             f"{_plural(cov['bucket_span_before_merge'], 'bucket')}, so "
             f"{_plural(absorbed, 'bucket')} "
             f"({cov['overlap_fraction'] * 100:.1f} percent) of the window time sat under "
-            f"another window and {'was' if absorbed == 1 else 'were'} absorbed.")
+            f"another window and {'was' if absorbed == 1 else 'were'} absorbed. "
+            f"{_plural(raw.get('overlap_seconds', 0), 'second')} of genuine overlap is in "
+            f"the raw times, before any bucket is applied.")
 
 
 def point_event_notice(name: str, note: dict, bucket_s: int) -> str:
@@ -2423,7 +2542,8 @@ def render_report(r: dict) -> str:
         if block:
             lines += block + [""]
 
-    if res.get("alert_duplicates", {}).get("duplicate_rows"):
+    if (res.get("alert_duplicates", {}).get("duplicate_rows")
+            or res.get("alert_duplicates", {}).get("repeats_suspected")):
         lines += [duplicate_notice(res), ""]
 
     if res.get("implausible_prevalence"):
