@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: >-
   If you use this reproduction package, cite the IEEE Access article and the Zenodo
-  artifact it reproduces. The package itself is archived at DOI 10.5281/zenodo.22185619
+  artifact it reproduces. The package itself is archived at DOI 10.5281/zenodo.22309308
   (concept DOI 10.5281/zenodo.22170201 resolves to the latest version).
 type: software
 title: >-
@@ -12,9 +12,9 @@ authors:
     given-names: Mateen Ali
     orcid: https://orcid.org/0009-0001-7231-8515
     affiliation: Phono Technologies Inc.
-version: 1.1.0
-date-released: "2026-08-31"
-doi: 10.5281/zenodo.22185619
+version: 1.2.0
+date-released: "2026-09-04"
+doi: 10.5281/zenodo.22309308
 license: Apache-2.0
 repository-code: "https://github.com/mateenali66/otel-aiops-reproduction"
 keywords:
