@@ -3,6 +3,29 @@
 ## Unreleased
 
 ### Added
+- A README section on getting alert data out of a real vendor, which is the hardest part
+  of using `check` and was undocumented. It covers Datadog Watchdog specifically: there is
+  no monitor behind Watchdog and it is not in the Datadog MCP surface, its output is Events
+  and not Logs so searching Logs first gives a false negative, the Events API v2 query is
+  `filter[query]=source:watchdog`, windows have to be rebuilt by grouping on the
+  `story_key` tag and taking the minimum and maximum event timestamp because Watchdog emits
+  one event per story update rather than a window, those reconstructed ends are the last
+  update and not resolution so they are approximations invented at export time that this
+  tool then treats as exact, pagination truncates silently (one run capped at 6000 events
+  without saying so, and the tool only sees a CSV so it cannot tell the export was short),
+  and `has_notification` has to be checked before anything is measured because an alert
+  that never reached a human is a different object from a monitor that pages someone. It
+  also warns generally that incident-tracker close times are ticket hygiene rather than
+  impact, and that building incident windows from when alerting started and stopped is
+  usually closer to the truth.
+- `--scope-col` and `--incident-scope-col` for the optional service or scope column, plus
+  recognition of `service`, `service_name`, `scope`, `entity` and `component` by name.
+- `--no-sweep`, which turns off the bucket sweep and gives the single-bucket verdict and
+  its exit code back.
+- A fourth verdict, `UNSTABLE`, with exit code 4. It means the verdict changed across
+  bucket sizes, so no single verdict is the result. It is alerts mode only.
+- `check_result.json` gains `incident_concentration`, `bucket_sweep` and `scope` under
+  `results`, and `scope_column` and `distinct_scopes` under each window file in `inputs`.
 - `check`, a bring-your-own-data path. It evaluates a detector against your own
   monitoring output rather than the archived benchmark, and needs no download.
   Two input shapes, alert windows or per-timestamp scores, both as CSV, with
@@ -26,6 +49,86 @@
   column list of every window file under `inputs`.
 
 ### Fixed
+- **Two forgotten tickets destroyed the result and the tool said nothing.** On a real
+  PagerDuty export of 23 incidents over 35.6 days, two rows had been sitting open for 13
+  days and 12 days and accounted for 601 of the 620 total incident-hours. The remaining 21
+  incidents held 19 hours between them. Prevalence came out at 0.383 instead of 0.020, a
+  19-fold move, and the verdict turned over. Nobody was in a 13 day outage. Somebody forgot
+  to close a ticket.
+
+  The existing assumption text warned that tracker times are imprecise, but that warning is
+  about minutes of slop at the window edges, not about one row spanning a third of the
+  observation window. Every incident tracker has forgotten-open tickets, so this hits
+  almost everyone who runs the tool.
+
+  An incident row is now called implausibly long when it covers at least 10 percent of the
+  observation range **and** runs at least 10 times the median incident in the same file.
+  Both conditions are needed. Without the first, ordinary spread is condemned: where the
+  median row is ten seconds, a five minute blip is 30 times the median and normal. Without
+  the second, a real outage in a short window is condemned: four hours of a single day is
+  17 percent of the range and there is nothing wrong with it. At least three in-range rows
+  are needed, because a median of one or two rows is not a median.
+
+  When it fires, the report says so next to the verdict. It names how many rows, how long
+  they are, what share of the range and what multiple of the median that is, what share of
+  all incident time they own, and what prevalence would have been without them. It says
+  plainly that a small number of rows own most of the positive class and the result rests
+  on them. Nothing is dropped, because which rows are real is the user's call. The rows are
+  listed in `check_result.json` under `incident_concentration`.
+
+  The general form is reported too. When the longest tenth of the incident rows owns half
+  or more of all incident time, the report says the ground truth is lopsided and names the
+  share, whether or not any single row looks broken.
+  `LONG_INCIDENT_RANGE_SHARE`, `LONG_INCIDENT_MEDIAN_MULTIPLE` and `CONCENTRATION_NOTICE`
+  in `fdes/byod.py` set the thresholds.
+- **The bucket size chose the verdict.** On the same export the verdict was `EXCLUDE` at 1m
+  and 5m and `PASS` at 15m, 30m, 1h and 2h, with the lift climbing monotonically through
+  0.82, 0.90, 1.05, 1.21, 1.25 and 1.28. The detector never changed. The cause is
+  mechanical: a coarse bucket lets one short alert cover an entire incident bucket for
+  free, so recall rises with the bucket size while precision is barely charged for it. The
+  operator picks the bucket, and by picking the bucket they pick the answer.
+
+  The near-the-floor notice added earlier was not enough here. It says the margin is thin.
+  It does not say whether the answer moves.
+
+  Alerts mode now runs the whole check at 1m, 5m, 15m and 1h, plus whatever `--bucket` was
+  passed, and reports the verdict at each. When they all agree the verdict stands and the
+  report says the sweep was run and what it found, with the table under the checks. When
+  they disagree the verdict is `UNSTABLE` and the report leads with the table, says which
+  buckets gave which answer, and says that the single-bucket numbers below it are reported
+  for the record and are not the answer. A monotonic lift is named as the signature of the
+  mechanism rather than of a detector that works at one time scale. Only `PASS` and
+  `EXCLUDE` rows are compared: a bucket that comes out `INSUFFICIENT` is listed and left
+  out, because it says there was nothing to measure there and not that the answer flipped.
+
+  The sweep is alerts mode only. In scores mode the operating point moves with the bucket
+  as well as the bucket boundaries, so a sweep there would change two things at once. The
+  near-the-floor notice now points at the sweep result instead of asking the user to re-run
+  the thing themselves. `SWEEP_BUCKETS` in `fdes/byod.py` sets the ladder.
+- **Alerts and incidents could describe different systems and nothing noticed.** In the
+  same run Watchdog covered 34 services while all 23 PagerDuty incidents came from a single
+  service, so most of the 156 alerts could not possibly have corresponded to any incident
+  in the file, and every one of them was scored as a false positive. The CSVs carry no
+  notion of scope, so precision, F1 and the verdict were all measuring the mismatch rather
+  than the detector.
+
+  Both window CSVs can now carry an optional service or scope column. When both have one,
+  the report gives the distinct scope count on each side, how many they share, and what
+  share of the alert rows fall on scopes that appear in no incident. When at least half of
+  the alert rows fall on unmatched scopes, the report says next to the verdict that the two
+  files may be describing different systems and that the result is unreliable.
+
+  Scope is reported and never applied. No row is filtered by it and no number moves because
+  of it, so the same two files give the same verdict with the column and without it. When
+  the columns are absent the run behaves exactly as before, and the report says in the
+  assumption list that scope was not checked and what that risks. Scores mode always says
+  this, because a score series has no scope column to compare with.
+  `SCOPE_OVERLAP_POOR` in `fdes/byod.py` sets the threshold.
+
+  **No published result changes for any of the three.** All of it is on the `check` path.
+  `tables/fdes_checks.csv`, `tables/table4_single_signal.csv` and `tables/vus.csv` are still
+  byte identical against `runs/2026-08-29-smoke-m4pro/`, and `make smoke`, `make verify`,
+  `make verify-archive` and `make pilot` all pass unchanged.
 - **A flag-everything detector reported PASS.** On a real Splunk and PagerDuty export the
   tool returned `PASS` for a detector that alerted on 94.5 percent of the week. Prevalence
   0.043, recall 1.00, precision 0.045, F1 0.087 against a predict-all floor of 0.082.
@@ -202,8 +305,19 @@
 - Prevalence, and therefore the floor, depends on the bucket size and time range
   you choose. Two operators using different buckets cannot compare lift figures.
   The alerted rate moves with the bucket for the same reason, so the alerted-rate
-  guard is read on the bucket you picked. A lift near 1.0 now says so next to the
-  verdict, which is the case where that choice decides the answer.
+  guard is read on the bucket you picked. Alerts mode now sweeps four bucket sizes
+  and refuses to hand back one verdict when they disagree, which shows the effect
+  rather than removing it. There is still no principled way to pick the bucket, and
+  the sweep does not run in scores mode.
+- The implausibly-long and lopsided thresholds are judgement calls, not results.
+  Ten percent of the range and ten times the median catch the forgotten tickets we
+  have seen and leave real long outages alone, and a file can sit on either side of
+  either line for honest reasons. The report gives the underlying numbers so the
+  call can be made by hand.
+- The scope check compares scope strings for equality. Two exports naming the same
+  service differently (`checkout` against `checkout-api`, or a Datadog tag against
+  a PagerDuty service name) read as no overlap at all. Normalise the names in the
+  CSVs before relying on the share it reports.
 - Postmortem windows start when impact was noticed rather than when the signal
   moved, so an early-firing detector is charged false positives.
 - The reported threshold is chosen in sample. Treat it as a description of this

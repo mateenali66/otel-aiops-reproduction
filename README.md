@@ -363,13 +363,181 @@ make check SCORES=my_scores.csv INCIDENTS=my_incidents.csv BUCKET=5m \
   FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z THRESHOLD=0.82
 ```
 
-Exit code 0 means PASS, 2 means EXCLUDE and 3 means INSUFFICIENT. The run writes
-`out/check/<name>/check_result.json` and `check_report.md`.
+Exit code 0 means PASS, 2 means EXCLUDE, 3 means INSUFFICIENT and 4 means UNSTABLE. The run
+writes `out/check/<name>/check_result.json` and `check_report.md`.
 
-### The three verdicts
+### Getting alert data out of a real vendor
+
+This is the hardest part of using the tool and it has nothing to do with the tool. The
+export is where the result is won or lost, so what follows is what one real export took.
+
+**Datadog Watchdog.** Watchdog is the case that breaks every reasonable assumption.
+
+- There is no monitor behind it. Watchdog is not a monitor you can list, and it is not in
+  the Datadog MCP surface either, so anything that walks monitors will report that you have
+  no Watchdog data. You do.
+- Its output is Events, not Logs. Searching Logs first returns nothing and reads as a
+  clean negative. It is not one. Go to Events.
+- Use the Events API v2 with `filter[query]=source:watchdog`. That gets you the raw
+  stream.
+- Watchdog emits one event per story update, not one event per window. To get windows,
+  group the events on the `story_key` tag and take the minimum and maximum event timestamp
+  in each group. That gives you a start and an end per story.
+- **Those ends are not resolution times.** The maximum is the last update Watchdog sent,
+  which is usually before the story actually ended and sometimes long before. You invented
+  those end times at export, and this tool will treat them as exact, because a CSV carries
+  no uncertainty. Every false negative charged near the end of a window may be an artefact
+  of that reconstruction.
+- Pagination truncates silently. One run of ours stopped at 6000 events and said nothing
+  about it. The tool only ever sees your CSV, so a short export looks exactly like a quiet
+  week. Page until the cursor is exhausted and count the rows yourself before you trust the
+  file.
+- Check `has_notification` before you measure anything. A Watchdog story that never paged
+  a human is a different object from a monitor that woke somebody at 3am. Measuring the two
+  together answers a question nobody asked. Decide which one you are evaluating and filter
+  to it.
+
+**Incident trackers in general.** A close time in PagerDuty, Jira or ServiceNow is ticket
+hygiene, not impact. It records when somebody clicked resolve. Tickets get closed at the
+end of the shift, on Monday morning, or never. Incident windows built from close times are
+longer than the incident was, sometimes by orders of magnitude, and the tool reads them as
+exact ground truth.
+
+Where you can, build the incident windows from when alerting started and stopped rather
+than from the ticket. That is usually much closer to the truth, it is recoverable from the
+same alerting system you are evaluating (use a different signal from the one under test, or
+the on-call paging record), and it does not depend on anybody remembering to close
+anything. When you cannot, read the forgotten-ticket notice below, because the tool now
+looks for the rows this produces.
+
+### Incident rows nobody closed
+
+Two forgotten tickets destroyed one real result. The export held 23 PagerDuty incidents
+over a 35.6 day window. Two of them had been sitting open for 13 days and 12 days and
+accounted for 601 of the 620 total incident-hours. The remaining 21 incidents held 19 hours
+between them. Prevalence came out at 0.383 instead of 0.020, a 19-fold move, and the
+verdict turned over. Nobody was in a 13 day outage. Somebody forgot to close a ticket.
+
+The tool said nothing. The assumption text warned that tracker times are imprecise, but
+that warning is about minutes of slop at the window edges, not about one row spanning a
+third of the observation window. Every incident tracker on earth has forgotten-open
+tickets, so this hits almost everyone who runs the tool.
+
+An incident row is now called implausibly long when **both** of these hold.
+
+1. It covers at least 10 percent of the observation range. A window spanning a tenth of
+   everything you watched is not an incident, it is a state.
+2. It runs at least 10 times the median incident in the same file. It has to be an outlier
+   against its own population, not just large.
+
+Both conditions are needed and each one protects a case the other gets wrong. Without the
+first, ordinary spread is condemned: in a file where the median row is ten seconds, a five
+minute blip is 30 times the median and perfectly normal. Without the second, a real outage
+in a short observation window is condemned: four hours of a single day is 17 percent of the
+range and there is nothing wrong with it. The guard also needs at least three rows in
+range, because a median of one or two rows is not a median.
+
+When it fires, the report says so next to the verdict, names how many rows, how long they
+are, what share of the observation range and what multiple of the median that is, and what
+share of all incident time they own. It says plainly that a small number of rows own most
+of the positive class and that prevalence, the floor and the verdict rest on them. It also
+prints what prevalence would have been without them, so the size of the effect is on the
+page rather than left as an exercise.
+
+**Nothing is dropped.** Which rows are real is your call and the tool does not get to make
+it. The rows are listed in `check_result.json` under `incident_concentration`, with their
+start, end, length, share of range and share of incident time, so you can go and look them
+up in the tracker.
+
+The general form of the same problem is reported too, whether or not any single row looks
+broken. When the longest tenth of the incident rows owns half or more of all incident time,
+the report says the ground truth is lopsided and names the share. A file like that is not
+necessarily wrong, and correcting one or two end times would still move the result.
+`LONG_INCIDENT_RANGE_SHARE`, `LONG_INCIDENT_MEDIAN_MULTIPLE` and `CONCENTRATION_NOTICE` in
+`fdes/byod.py` set the three thresholds.
+
+### The bucket size chooses the verdict
+
+On the same real export the verdict was `EXCLUDE` at 1m and 5m and `PASS` at 15m, 30m, 1h
+and 2h. The lift climbed monotonically: 0.82, 0.90, 1.05, 1.21, 1.25, 1.28. The detector
+never changed. The cause is mechanical. A coarse bucket lets one short alert cover an
+entire incident bucket for free, so recall rises with the bucket size while precision is
+barely charged for it. The operator picks the bucket, and by picking the bucket they pick
+the answer.
+
+So alerts mode does not hand back one bucket's answer as if it were settled. It runs the
+whole check at 1m, 5m, 15m and 1h, plus whatever `--bucket` you passed, and reports the
+verdict at every one of them.
+
+- When every bucket agrees, the verdict stands and the report says the sweep was run and
+  what it found, so a reader knows the question was asked. The table sits under the checks.
+- When they disagree, the verdict is `UNSTABLE`, exit code 4. The report leads with the
+  table of verdicts, says which buckets gave which answer, and says that the single-bucket
+  numbers printed below it are reported for the record and are not the answer. When the
+  lift rises at every step of the ladder, it names that as the signature of the mechanism
+  above rather than of a detector that works at one time scale.
+
+`UNSTABLE` is not a softer `EXCLUDE`. It says this input cannot settle the question on its
+own. To settle it, pick the bucket size from the time scale your responders actually work
+at and be able to say why you picked it, or treat the result as undecided. Only rows that
+gave `PASS` or `EXCLUDE` are compared. A bucket size that comes out `INSUFFICIENT` is
+listed and left out of the comparison, because it says there was nothing to measure there,
+not that the answer flipped.
+
+`--no-sweep` turns it off and gives you the single-bucket verdict and its exit code back.
+The sweep is four extra runs of arithmetic on the same arrays, so it costs nothing worth
+saving. `SWEEP_BUCKETS` in `fdes/byod.py` sets the ladder. The sweep is alerts mode only:
+in scores mode the operating point moves with the bucket as well as the bucket boundaries,
+so a sweep there would change two things at once and answer neither.
+
+### Scope, when the two files describe different systems
+
+Watchdog covered 34 services in that same run. All 23 PagerDuty incidents came from a
+single service. So most of the 156 alerts could not possibly have corresponded to any
+incident in the file, and every one of them was scored as a false positive. The CSVs carry
+no notion of scope, so nothing noticed, and precision, F1 and the verdict were all
+measuring the mismatch rather than the detector.
+
+Both window CSVs can now carry an optional service or scope column. `service`,
+`service_name`, `scope`, `entity` and `component` are recognised by name, and `--scope-col`
+and `--incident-scope-col` name anything else. `--incident-scope-col` falls back to
+`--scope-col`, the same as the start and end overrides.
+
+```bash
+python bin/reproduce.py check \
+  --alerts watchdog_export.csv --start-col triggered_at --end-col resolved_at \
+  --scope-col service \
+  --incidents pagerduty.csv --incident-scope-col service_name \
+  --bucket 5m --from 2026-03-01T00:00:00Z --to 2026-04-05T00:00:00Z
+```
+
+When both files have one, the report gives the number of distinct scopes on each side, how
+many they share, and what share of the alert rows fall on scopes that appear in no
+incident. When at least half of the alert rows fall on unmatched scopes, the report says
+next to the verdict that the two files may be describing different systems and that the
+result is unreliable until they cover the same scope.
+
+Scope strings are compared for equality, so two exports naming the same service differently
+(`checkout` against `checkout-api`, or a Datadog tag against a PagerDuty service name) read
+as no overlap at all. Normalise the names in the CSVs before you trust the share.
+
+**Scope is reported and never applied.** No row is filtered by it and no number moves
+because of it, so the same two files give the same verdict with the column and without it.
+Filtering both exports to the scopes they share is a decision about what you are measuring,
+and it belongs to you.
+
+When the columns are absent, the run behaves exactly as it did before, and the report says
+in the assumption list that scope was not checked and what that risks: every alert is
+scored against every incident whatever system it came from, alerts on services with no
+incident in the file are counted as false positives and could not have been anything else,
+and nothing in the numbers shows it. Scores mode always says this, because a score series
+has one row per timestamp and no scope column to compare with.
+
+### The four verdicts
 
 `EXCLUDE` and `INSUFFICIENT` are opposite messages. One says fix your detector. The other
-says fix your input. The pilot path uses the same three verdicts and the same exit codes.
+says fix your input. `UNSTABLE` says the input and the bucket size together cannot settle
+it. The pilot path uses the first three verdicts and the same exit codes.
 
 | Verdict | Exit code | What it means | What to do |
 |---|---|---|---|
@@ -377,6 +545,7 @@ says fix your input. The pilot path uses the same three verdicts and the same ex
 | | 1 | not a verdict. The command failed on a bad argument, an unreadable CSV or a missing file, and printed the reason to stderr | fix what the message names |
 | `EXCLUDE` | 2 | the input supported a verdict and the detector failed a check | the detector is not worth deploying as it stands |
 | `INSUFFICIENT` | 3 | the input could not support a verdict either way | fix the CSVs or the range, then run it again |
+| `UNSTABLE` | 4 | the verdict changed across bucket sizes, so no single verdict is the result (alerts mode) | pick the bucket from the time scale your responders work at and say why, or treat it as undecided |
 
 A non-zero exit is not a crash here. Only 1 means the command failed, and no verdict uses
 it, so continuous integration can branch on the code without reading the output. `make
@@ -457,10 +626,14 @@ neighbourhood of 1.0, and the verdict still flipped between `PASS` and `EXCLUDE`
 them.
 
 When the lift lands within 20 percent of 1.0 either way, the report says so next to the
-verdict, names the lift, and asks you to re-run with other `--bucket` values before
-trusting the answer. Two bucket sizes that disagree mean the detector is sitting on the
-floor, not that one of the runs is wrong. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the
+verdict and names the lift. Two bucket sizes that disagree mean the detector is sitting on
+the floor, not that one of the runs is wrong. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the
 band, and `check_result.json` carries the same flag as `near_floor`.
+
+This notice is not enough on its own, which is why the bucket sweep above exists. A near
+the floor notice says the margin is thin. The sweep says whether the answer actually moves.
+In alerts mode the notice now points at the sweep result instead of asking you to go and
+re-run the thing yourself.
 
 ### Overlapping alert windows
 
@@ -486,7 +659,7 @@ work for a start, `end` / `end_time` / `resolved_at` / `to` for an end, `timesta
 `time` / `ts` / `_time` for a time, and `score` / `anomaly_score` / `value` / `deviation`
 for a score. Anything else, name it with `--start-col`, `--end-col`, `--timestamp-col` or
 `--score-col`. Extra columns are ignored, except that a `severity` or `priority` column is
-counted in the report.
+counted in the report and a `service` or `scope` column is used for the scope check above.
 
 The alerts CSV and the incidents CSV are separate exports and often disagree on header
 names. A Watchdog export uses `triggered_at` and `resolved_at` while an incident tracker
@@ -559,6 +732,9 @@ used.
 | Flag-everything guard on F1 and recall | 8b | yes | yes |
 | Flag-everything guard on the alerted rate against prevalence | 8b | yes | yes |
 | Degenerate output guard (alerts on all, alerts on none, one near-constant score) | 8 | yes | yes |
+| Implausibly long and lopsided incident rows | input quality | yes | yes |
+| Verdict at 1m, 5m, 15m and 1h, and whether they agree | input quality | yes | **no** |
+| Scope overlap between the two files | input quality | yes, when both files carry a scope column | **no** |
 | AUC-ROC against its 0.5 reference | 6, 7, 8a | **no** | yes |
 | PR-AUC against its p reference | 6, 7 | **no** | yes |
 | VUS-PR and VUS-ROC | 6 | **no** | yes, but only when every bucket in the range holds a score sample |
@@ -624,6 +800,10 @@ $ make check ALERTS=examples/alerts_useless.csv
 
 Verdict: **EXCLUDE**
 
+Bucket sweep. The same two files were re-run at 1m, 5m, 15m, 1h and every bucket that
+could be evaluated gave EXCLUDE, so the verdict does not turn on the bucket size you
+picked. The table is under the checks.
+
 Timeline 2026-03-01T00:00:00Z to 2026-03-08T00:00:00Z, 2016 buckets of 300 s.
 2016 buckets were evaluated, of which 102 fall inside an incident window.
 
@@ -643,6 +823,19 @@ Timeline 2026-03-01T00:00:00Z to 2026-03-08T00:00:00Z, 2016 buckets of 300 s.
 
 Precision 0.038, recall 0.078, F1 0.051. True positives 8, false positives 202,
 false negatives 94, true negatives 1712.
+
+## The verdict at other bucket sizes
+
+The same two files, re-bucketed. A coarse bucket lets one short alert cover a whole bucket
+of incident time for free, so this table is the cheapest way to see whether the verdict is
+a property of the detector or of the bucket size.
+
+| Bucket | Buckets | Prevalence | Alerted rate | Recall | F1 | Floor | F1 / floor | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 1m | 10080 | 0.0506 | 0.104 | 0.078 | 0.051 | 0.096 | 0.53 | EXCLUDE |
+| 5m (yours) | 2016 | 0.0506 | 0.104 | 0.078 | 0.051 | 0.096 | 0.53 | EXCLUDE |
+| 15m | 672 | 0.0536 | 0.104 | 0.111 | 0.075 | 0.102 | 0.74 | EXCLUDE |
+| 1h | 168 | 0.0774 | 0.125 | 0.154 | 0.118 | 0.144 | 0.82 | EXCLUDE |
 
 ## What this run could not compute
 
@@ -665,6 +858,12 @@ sweep. [...]
 2. examples/incidents.csv: timestamps read as ISO 8601, all rows carried a timezone.
 3. Sub-second precision was floored away. The bucket is 300 s, so this only matters if
    your events are shorter than a second.
+4. The incident windows were taken as exact ground truth. Postmortem and incident-tracker
+   times usually are not. [...]
+5. A tracker close time is a record of when somebody closed a ticket, not a record of when
+   impact stopped. A row left open over a weekend covers the weekend. [...]
+6. Scope was not checked. Neither file carries a column this tool recognises as a service
+   or scope, so name one with --scope-col and --incident-scope-col if you have it. [...]
 ```
 
 The full report also lists the input files, their row counts, their severity distribution

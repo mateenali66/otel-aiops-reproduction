@@ -22,6 +22,8 @@ Exit codes
      detector failed a check. The run itself worked, so this is not an error
   3  pilot and check only: the verdict is INSUFFICIENT. The input could not support a
      verdict either way, so fix the CSVs or the range and run it again
+  4  check alerts mode only: the verdict is UNSTABLE. The same input gives different
+     verdicts at different bucket sizes, so no single verdict is the result
 
 Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
 sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
@@ -479,7 +481,7 @@ def cmd_verify_archive(args) -> None:
 # EXCLUDE means the detector is not worth deploying. INSUFFICIENT means the input could not
 # support a verdict either way, which is a problem with the input and not with the detector.
 # Both the pilot path and the check path use them.
-VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3}
+VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3, "UNSTABLE": 4}
 # A real failure exits 1 and nothing else does, so 2 is never a crash. Continuous
 # integration reads 2 as "this detector was rejected" and 1 as "this command broke".
 EXIT_ERROR = 1
@@ -488,7 +490,9 @@ EXIT_CODE_HELP = """exit codes
   0  PASS, the detector cleared every check that could be evaluated
   1  the command failed (bad argument, unreadable CSV, missing file). Not a verdict
   2  EXCLUDE, the input supported a verdict and the detector failed a check. Not an error
-  3  INSUFFICIENT, the input could not support a verdict either way"""
+  3  INSUFFICIENT, the input could not support a verdict either way
+  4  UNSTABLE, the verdict changed across bucket sizes so no one verdict is the result
+     (check, alerts mode)"""
 
 
 def fail(message: str) -> None:
@@ -529,7 +533,10 @@ def cmd_check(args) -> None:
                 t_from=args.range_from, t_to=args.range_to, infer_range=args.infer_range,
                 start_col=args.start_col, end_col=args.end_col,
                 incident_start_col=args.incident_start_col,
-                incident_end_col=args.incident_end_col)
+                incident_end_col=args.incident_end_col,
+                scope_col=args.scope_col,
+                incident_scope_col=args.incident_scope_col,
+                sweep=not args.no_sweep)
             label = args.label or Path(args.alerts).stem
         else:
             result = byod.check_scores(
@@ -626,6 +633,17 @@ def main() -> None:
     s.add_argument("--incident-end-col", default=None,
                    help="override the window end column name in the incidents CSV. "
                         "Defaults to --end-col.")
+    s.add_argument("--scope-col", default=None,
+                   help="name the optional service or scope column in the alerts CSV. When "
+                        "both files carry one, the report says how far the two exports "
+                        "overlap and warns when they may describe different systems.")
+    s.add_argument("--incident-scope-col", default=None,
+                   help="name the optional service or scope column in the incidents CSV. "
+                        "Defaults to --scope-col.")
+    s.add_argument("--no-sweep", action="store_true",
+                   help="in alerts mode, do not re-run the check at other bucket sizes. "
+                        "The sweep is on by default because a coarse bucket can move the "
+                        "verdict on its own.")
     s.add_argument("--label", default=None, help="subdirectory name under --out")
     s.add_argument("--out", default=str(OUT_DIR / "check"))
     s.set_defaults(fn=cmd_check)
