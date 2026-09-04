@@ -8,6 +8,8 @@
 #   make reproduce      full 8 models x 3 signals x 5 folds (prints the estimate first)
 #   make verify MODE=full
 #   make pilot          run the example detector plugin under the FDES procedure
+#   make check          run the FDES checks on your own alert or score CSVs (no Zenodo needed)
+#   make test           unit tests for the check path (no Zenodo needed)
 #   make docker-build / docker-smoke
 
 PYTHON ?= python3
@@ -18,10 +20,21 @@ DETECTOR ?= detectors.example_isolation_forest:ExampleIsolationForest
 SIGNAL ?= logs
 FOLD   ?= 1
 
-.PHONY: help fetch smoke reproduce verify verify-archive estimate pilot expected docker-build docker-smoke clean
+# `make check` defaults to the shipped sample data so it runs before you export anything.
+# Point it at your own files: make check ALERTS=my_alerts.csv INCIDENTS=my_incidents.csv \
+#   BUCKET=5m FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z
+# For a score series, pass SCORES= instead of ALERTS=.
+ALERTS    ?= examples/alerts_good.csv
+INCIDENTS ?= examples/incidents.csv
+BUCKET    ?= 5m
+FROM      ?= 2026-03-01T00:00:00Z
+TO        ?= 2026-03-08T00:00:00Z
+SCORES    ?=
+
+.PHONY: help fetch smoke reproduce verify verify-archive estimate pilot check test examples expected docker-build docker-smoke clean
 
 help:
-	@sed -n '2,13p' Makefile
+	@sed -n '2,14p' Makefile
 
 fetch:
 	$(PYTHON) bin/reproduce.py fetch $(if $(FROM_ZIP),--from-zip $(FROM_ZIP))
@@ -43,6 +56,18 @@ verify-archive:
 
 pilot:
 	$(PYTHON) bin/reproduce.py pilot --detector $(DETECTOR) --signal $(SIGNAL) --fold $(FOLD)
+
+check:
+	$(PYTHON) bin/reproduce.py check $(if $(SCORES),--scores $(SCORES),--alerts $(ALERTS)) \
+		--incidents $(INCIDENTS) --bucket $(BUCKET) \
+		$(if $(FROM),--from $(FROM)) $(if $(TO),--to $(TO)) \
+		$(if $(THRESHOLD),--threshold $(THRESHOLD)) $(if $(LABEL),--label $(LABEL))
+
+test:
+	$(PYTHON) -m unittest discover -s tests -v
+
+examples:
+	$(PYTHON) examples/make_examples.py
 
 expected:
 	$(PYTHON) bin/build_expected.py

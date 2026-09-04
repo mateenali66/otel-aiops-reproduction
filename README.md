@@ -15,6 +15,9 @@ v1.0.0-draft ([github.com/mateenali66/failure-detection-evaluation-spec](https:/
 It ships a plugin interface, so an operator can put their own detector through the same
 procedure and get a pass or exclude verdict against the specification.
 
+If what you actually want is to point the checks at your own monitoring data, skip to
+[Check your own data](#check-your-own-data). That path needs two CSVs and no download.
+
 ## Quick start
 
 ```bash
@@ -25,7 +28,12 @@ make smoke            # one signal, one fold: a few minutes on a laptop CPU
 make verify           # compares out/smoke against expected/, exit code 1 on mismatch
 make verify-archive   # regenerates the archived tables from the archived raw scores (seconds)
 make pilot            # runs the example detector plugin under the FDES procedure
+make check            # runs the FDES checks on the sample CSVs in examples/
+make test             # unit tests for the check path
 ```
+
+`make check` and `make test` need neither the Zenodo download nor a GPU. They need numpy,
+pandas and scikit-learn from `requirements.txt` and nothing else.
 
 The container route needs no local Python.
 
@@ -73,6 +81,7 @@ budget control, table building, verification, the FDES checks and the detector p
 | `results/optuna_results.csv` | Table 3 search spaces, selected hyperparameters | artifact `training.py` |
 | `results/raw_scores/*.npy` | inputs to Table 10 (prevalence re-scoring) and Table 12 via the artifact's `prevalence_sensitivity.py` and `score_based_analyses.py` | artifact `training.py` |
 | `out/pilot/<detector>_<signal>_fold<k>/pilot_report.md` | FDES verdict for your own detector | `fdes/protocol.py` |
+| `out/check/<name>/check_report.md` | FDES verdict for your own alert or score CSVs | `fdes/byod.py` |
 
 Figures 2 to 7 are regenerated from the CSVs above with the artifact's `code/figures/*.py`
 (matplotlib and seaborn are pinned for that purpose). Figures 8 to 15 (feature importance,
@@ -151,6 +160,8 @@ torch 2.5.1, with the venv route.
 | `make verify` | under 2 s | |
 | `make verify-archive` | 2 s | |
 | `make pilot` | 2 s | example Isolation Forest plugin |
+| `make check` | under 2 s | sample CSVs in `examples/`, one week at five minute buckets |
+| `make test` | 6 s | 40 unit tests for the check path |
 | `make reproduce` | not run in this repository yet | see the estimate below |
 
 The full run was not executed here. The artifact records 41.8 hours of training time
@@ -185,15 +196,18 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 | Threshold-independent metrics from both families (AUC-ROC, PR-AUC) with random references (0.5, p) | 6, 7 | `fdes/checks.py::check_row` |
 | Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | `fdes/vus.py`, `tables/vus.csv`, pilot report |
 | Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
-| Flag-everything guard: F1 within 5 percent of the floor with recall at or above 0.95 | 8b | `sec8b_flag_everything` |
+| Flag-everything guard: F1 within 5 percent of the floor, above or below it, with recall at or above 0.95 | 8b | `fdes/checks.py::flag_everything`, `sec8b_flag_everything` |
 | Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
 | Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | artifact `training.py`, and `fdes/protocol.py` for pilots |
 | Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
 | Episode-level detection rate. Step 6's detection-latency distribution is not implemented, here or in the artifact | 5 (step 6, in part) | artifact `training.py::evaluate_episode_detection` (`results/episode_results.csv`) |
 | Published seed policy, per-fold results, regeneration from archived scores | 9 | this README, `expected/model_results_per_fold.csv`, `make verify-archive` |
+| Sections 2, 6, 7 and 8 applied to an operator's own alert or score CSVs, with an explicit list of what the input could not support | 2, 6, 7, 8 | `fdes/byod.py`, `make check` |
 
 The 5 percent margin in the section 8b check is this package's choice of "the evaluator's
-stated margin". Change `FLOOR_MARGIN` in `fdes/checks.py` to use your own.
+stated margin". It is two sided, so F1 has to sit near the floor from either direction, and
+a detector well above the floor is not in the flag-everything regime however high its
+recall gets. Change `FLOOR_MARGIN` in `fdes/checks.py` to use your own margin.
 
 `fdes/vus.py` is a port of the VUS reference implementation from TSB-AD
 (https://github.com/TheDatumOrg/TSB-AD, Apache-2.0), the implementation of Paparrizos et
@@ -250,16 +264,255 @@ that archived row exactly (precision 0.4755, recall 0.7420, F1 0.5796, AUC-ROC 0
 PR-AUC 0.5321 on 10,449 cooldown-excluded windows). That is the self-consistency check that
 the pilot protocol scores a detector the way the article did.
 
+## Check your own data
+
+The pilot path above needs the archived feature tables and a detector object that returns
+one score per window. Most operators have neither. Anomaly detection usually arrives
+pre-installed inside a vendor product. Datadog ships Watchdog and `anomalies()` monitors,
+Splunk ships ITSI adaptive thresholding and MLTK, Dynatrace ships Davis. What comes out of
+those is not a score column. It is a list of alert windows, and the ground truth is a list
+of incident windows from a postmortem or an incident tracker.
+
+`make check` takes that shape. It buckets a timeline, marks every bucket alerted or not and
+truly anomalous or not, and runs the same FDES section 2, 7 and 8 checks the article used.
+It needs no Zenodo artifact, no detector plugin and no GPU. CSV in, verdict out.
+
+### Thirty seconds, on the sample data
+
+```bash
+make check                                    # the good sample detector, verdict PASS
+make check ALERTS=examples/alerts_useless.csv # the useless one, verdict EXCLUDE
+```
+
+`examples/` ships seven synthetic CSVs (one ground truth and six detectors) plus the
+script that generates them
+(`examples/make_examples.py`). The scenario is one week with five incidents covering about
+5 percent of it. Each file uses a different timestamp format on purpose, so running them all
+shows what the tool says it assumed about each.
+
+| File | What it is | Verdict | Exit code |
+|---|---|---|---|
+| `incidents.csv` | the ground truth, five incident windows | | |
+| `alerts_good.csv` | catches four incidents of five and fires three times when nothing was wrong | PASS | 0 |
+| `alerts_useless.csv` | a static threshold on a metric that swings with the nightly batch window, so it is a clock and not a detector | EXCLUDE | 2 |
+| `alerts_everything.csv` | one window over the whole range | EXCLUDE | 2 |
+| `scores_good.csv` | an anomaly score that really does lift during incidents | PASS | 0 |
+| `scores_useless.csv` | a plausible-looking score with no relationship to the incidents | EXCLUDE | 2 |
+| `scores_flat.csv` | a model that collapsed and emits one constant number | EXCLUDE | 2 |
+
+`alerts_useless.csv` is the one worth reading. It scores F1 0.051, which looks like a
+number until it is put next to the predict-all floor of 0.096 at that prevalence. Flagging
+every single bucket would have scored twice as well. `scores_useless.csv` is the same trap
+one level up. Its F1 of 0.097 clears the floor by a hair, and then AUC-ROC 0.358 shows it
+ranks the buckets worse than a coin.
+
+### On your own data
+
+Two modes. Both take a ground-truth CSV of incident windows.
+
+**Alerts mode.** A CSV of alert windows, a CSV of incident windows, a time range and a
+bucket size. This is the mode for a vendor product.
+
+```bash
+python bin/reproduce.py check \
+  --alerts my_alerts.csv \
+  --incidents my_incidents.csv \
+  --bucket 5m \
+  --from 2026-03-01T00:00:00Z \
+  --to 2026-03-08T00:00:00Z
+```
+
+**Scores mode.** A CSV with a timestamp column and a score column, plus the same incident
+windows. This is the richer case and it is the only one that supports the rank metrics.
+
+```bash
+python bin/reproduce.py check \
+  --scores my_scores.csv \
+  --incidents my_incidents.csv \
+  --bucket 5m \
+  --from 2026-03-01T00:00:00Z \
+  --to 2026-03-08T00:00:00Z \
+  --threshold 0.82
+```
+
+The same through `make`, which is handy when you keep re-running it:
+
+```bash
+make check ALERTS=my_alerts.csv INCIDENTS=my_incidents.csv BUCKET=5m \
+  FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z
+make check SCORES=my_scores.csv INCIDENTS=my_incidents.csv BUCKET=5m \
+  FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z THRESHOLD=0.82
+```
+
+Exit code 0 means PASS and 2 means EXCLUDE, the same as `make pilot`. The run writes
+`out/check/<name>/check_result.json` and `check_report.md`.
+
+### The CSV format
+
+Alert and incident CSVs need a start column and an end column. Score CSVs need a timestamp
+column and a score column. Column names are matched case insensitively against the names
+real exports use, so `start` / `start_time` / `started_at` / `triggered_at` / `from` all
+work for a start, `end` / `end_time` / `resolved_at` / `to` for an end, `timestamp` /
+`time` / `ts` / `_time` for a time, and `score` / `anomaly_score` / `value` / `deviation`
+for a score. Anything else, name it with `--start-col`, `--end-col`, `--timestamp-col` or
+`--score-col`. Extra columns are ignored, except that a `severity` or `priority` column is
+counted in the report.
+
+An alerts CSV with a start but no end is read as point events, one bucket each. An alerts
+CSV with a header and no rows is read as "this detector never fired", which is a real
+result and gets a real verdict.
+
+Timestamps can be ISO 8601 or epoch seconds. Both of these are fine, and so is mixing the
+two across files, just not inside one column.
+
+```
+start,end
+2026-03-01T14:20:00Z,2026-03-01T15:15:00Z
+2026-03-02T15:05:00+00:00,2026-03-02T17:15:00+00:00
+```
+
+A timestamp with no timezone is read as UTC and the report says so. If your whole export
+is in one local zone that is harmless, because the same offset applies to every file. What
+is not harmless is mixing timezone-aware and naive rows inside one file, and the report
+calls that out. Epoch milliseconds are refused with a message telling you to divide by
+1000, rather than silently read as the year 58000. Sub-second precision is floored away.
+
+### The time range, and why it is not guessed
+
+Alerts and incidents say when something happened. They do not say when you were watching.
+So `check` refuses to infer the evaluation range from them and asks for `--from` and
+`--to`, printing the span of your data so you can copy it.
+
+`--infer-range` uses that span anyway. It makes the range as tight as the events allow,
+which throws away every quiet period outside them, and that inflates prevalence and
+flatters precision. It is there for a quick look, and the report says loudly that it was
+used.
+
+### What it computes
+
+| Check | Spec section | Alerts mode | Scores mode |
+|---|---|---|---|
+| Prevalence p from the ground-truth buckets | 2 | yes | yes |
+| Precision, recall, F1 at the operating point | 6 | yes | yes |
+| Predict-all baseline F1 = 2p/(1+p), and F1 minus it | 2, 7 | yes | yes |
+| Lift over the predict-all baseline | 7 | yes | yes |
+| Flag-everything guard | 8b | yes | yes |
+| Degenerate output guard (alerts on all, alerts on none, one near-constant score) | 8 | yes | yes |
+| AUC-ROC against its 0.5 reference | 6, 7, 8a | **no** | yes |
+| PR-AUC against its p reference | 6, 7 | **no** | yes |
+| VUS-PR and VUS-ROC | 6 | **no** | yes, but only when every bucket in the range holds a score sample |
+| Degenerate rule from the article's Table 12 | 8 | **no** | yes |
+
+### What alerts mode refuses to compute, and why
+
+**A threshold-independent rank metric cannot be computed from binary alerts.** A rank
+metric sweeps the threshold and measures how well the scores order the buckets. An alert
+window is a decision, not a score, so the threshold has already been applied and there is
+no ordering left to sweep.
+
+Passing a 0/1 vector to an AUC function does return a number. That number is a rescaling
+of the balanced accuracy at the one operating point you already have. It is a different
+quantity from a score-based AUC-ROC, and printing it in the same column as one would be
+the exact mistake this specification exists to stop. So alerts mode does not print it at
+all. The report has a "What this run could not compute" section that names AUC-ROC, PR-AUC,
+VUS-PR and VUS-ROC and gives the reason in full.
+
+Section 8a is the exclusion that fires when a threshold-independent score sits at or below
+its random reference. With no rank metric there is nothing to compare against 0.5, so
+section 8a cannot fire in alerts mode. The report says that too. **A PASS in alerts mode
+rests on fewer checks than a PASS in scores mode, and it is not evidence that section 8a
+would have been passed.** To get the rest, export the underlying anomaly score or deviation
+series and use scores mode.
+
+The same refusal applies in scores mode when the score column holds two or fewer distinct
+values. A 0/1 column is alerts in disguise.
+
+### The threshold in scores mode
+
+FDES section 5 step 2 wants the threshold picked on a validation split that is disjoint
+from the test set. One CSV cannot give that. So:
+
+- pass `--threshold` with the value your monitor actually uses, and you get your real
+  operating point,
+- or pass nothing, and the threshold is tuned in sample to maximise F1. That is an
+  optimistic upper bound, not a held-out estimate, and the report says so every time.
+
+`--aggregate max` (the default) or `--aggregate mean` reduces several score samples inside
+one bucket. Buckets with no score sample at all are dropped from the evaluation rather than
+treated as low-scoring, and the report counts them. Dropping them puts holes in the time
+axis, so VUS is skipped whenever any bucket is empty. VUS is range based and would score a
+timeline that never existed. AUC-ROC and PR-AUC ignore order and are reported either way.
+
+### A worked example
+
+```bash
+$ make check ALERTS=examples/alerts_useless.csv
+```
+
+```
+# FDES v1.0.0-draft check report: your own data (alerts mode)
+
+Verdict: **EXCLUDE**
+
+Timeline 2026-03-01T00:00:00Z to 2026-03-08T00:00:00Z, 2016 buckets of 300 s.
+2016 buckets were evaluated, of which 102 fall inside an incident window.
+
+| Check | Section | Value | Reference | Result |
+|---|---|---|---|---|
+| Prevalence | 2 | p = 0.0506 (102 of 2016 buckets) | | reported |
+| Predict-all F1 floor | 2, 7 | F1 = 0.051 | floor = 0.096 (p = 0.0506) | F1 minus floor = -0.045 |
+| Lift over predict-all | 7 (this tool's rule) | F1 / floor = 0.53 | > 1.0 | EXCLUDE |
+| Threshold-independent (ROC) | 6, 8a | NOT COMPUTED | 0.5 | see below |
+| Threshold-independent (PR) | 6, 7 | NOT COMPUTED | p | see below |
+| Range-based (VUS) | 6 | NOT COMPUTED | | see below |
+| Flag-everything guard | 8b | recall = 0.078, alerted rate = 0.104 | F1 within 5% of floor and recall >= 0.95 | pass |
+| Degenerate output guard | 8 | alerted rate = 0.104, distinct scores = n/a | alerts on all, alerts on none, or one near-constant score | pass |
+
+## Operating point
+
+Precision 0.038, recall 0.078, F1 0.051. True positives 8, false positives 202,
+false negatives 94, true negatives 1712.
+
+## What this run could not compute
+
+**Every threshold-independent rank metric (AUC-ROC, PR-AUC, VUS-PR, VUS-ROC)**
+
+Alerts mode gets binary alert windows. An alert window is a decision, not a score, so it
+is already thresholded. A rank metric sweeps the threshold and measures how well the
+scores order the buckets. With the threshold already applied there is no ordering left to
+sweep. [...]
+
+## Why the verdict is EXCLUDE
+
+1. F1 0.0513 is at or below the predict-all floor 0.0963, so flagging every bucket would
+   have scored the same or better.
+
+## What was assumed
+
+1. examples/alerts_useless.csv: timestamps read as ISO 8601, no row carried a timezone,
+   so every timestamp was read as UTC.
+2. examples/incidents.csv: timestamps read as ISO 8601, all rows carried a timezone.
+3. Sub-second precision was floored away. The bucket is 300 s, so this only matters if
+   your events are shorter than a second.
+```
+
+The full report also lists the input files, their row counts and their severity
+distribution. `check_result.json` next to it carries every number, the bucketing, and the
+machine-readable `not_computed` list.
+
 ## Layout
 
 ```
-bin/reproduce.py        single entry point (fetch, smoke, reproduce, verify, verify-archive, estimate, pilot)
+bin/reproduce.py        single entry point (fetch, smoke, reproduce, verify, verify-archive, estimate, pilot, check)
 bin/build_expected.py   regenerates expected/ from the fetched artifact
 fdes/checks.py          FDES section 2, 6, 7, 8 checks
 fdes/protocol.py        FDES section 5 procedure for pilots (reuses the artifact's split, cooldown, threshold and metric code)
 fdes/tables.py          Table 4, 5, 7, 8, below-chance, Friedman, VUS
 fdes/vus.py             VUS-PR and VUS-ROC, ported from the TSB-AD reference implementation
+fdes/byod.py            the bring-your-own-data path behind `make check`
 detectors/base.py       plugin interface; detectors/example_isolation_forest.py
+examples/               sample alert, incident and score CSVs plus the script that makes them
+tests/                  unit tests for the check path (`make test`, no Zenodo needed)
 expected/               archived values verify compares against
 runs/                   recorded runs: manifest, verify reports, tables (evidence, not inputs)
 Dockerfile              python:3.11-slim@sha256:1042b6... + CPU torch 2.5.1 + exact pins
@@ -268,8 +521,9 @@ data/, out/             created by fetch and the runs; git-ignored
 
 ## License
 
-The wrapper code and packaging in this repository (`bin/`, `fdes/`, `detectors/`, `Makefile`,
-`Dockerfile`, `requirements.txt`, `CITATION.cff` and this README) are Apache-2.0. The Zenodo
+The wrapper code and packaging in this repository (`bin/`, `fdes/`, `detectors/`,
+`examples/`, `tests/`, `Makefile`, `Dockerfile`, `requirements.txt`, `CITATION.cff` and
+this README) are Apache-2.0. The Zenodo
 artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `LICENSE`.
 
 ## Citation

@@ -8,7 +8,8 @@ Each function maps to a numbered section of SPEC.md:
               and every threshold-independent score next to its random reference
   section 8a  exclude when a threshold-independent score is at or below the random reference
   section 8b  exclude when an operating-point score sits within the stated margin of the
-              predict-all floor with recall near saturation (flag-everything regime)
+              predict-all floor with recall near saturation (flag-everything regime).
+              The margin is two sided: F1 must be near the floor, above or below it.
 
 The "degenerate" column reproduces the rule used for Table 12 / metric_reconciliation.csv
 in the IEEE Access article: AUC-ROC <= 0.55 and F1 >= 0.95 x predict-all F1.
@@ -31,12 +32,22 @@ def predict_all_f1(prevalence: float) -> float:
     return 2.0 * prevalence / (1.0 + prevalence)
 
 
+def flag_everything(f1: float, recall: float, floor: float) -> bool:
+    """Section 8b: is this detector sitting on the predict-all floor with saturated recall?
+
+    The margin is two sided. F1 has to be NEAR the floor. A detector well above the floor
+    is not flagging everything, however high its recall gets.
+    """
+    return bool((1.0 - FLOOR_MARGIN) * floor <= f1 <= (1.0 + FLOOR_MARGIN) * floor
+                and recall >= RECALL_SATURATION)
+
+
 def check_row(prevalence: float, f1: float, recall: float, auc_roc: float,
               pr_auc: float | None = None) -> dict:
     """Apply the section 7 and 8 checks to one (detector, signal, fold) result."""
     floor = predict_all_f1(prevalence)
     sec8a = bool(auc_roc <= RANDOM_AUC_REFERENCE)
-    sec8b = bool(f1 >= (1.0 - FLOOR_MARGIN) * floor and recall >= RECALL_SATURATION)
+    sec8b = flag_everything(f1, recall, floor)
     degenerate = bool(auc_roc <= DEGENERATE_AUC and f1 >= DEGENERATE_F1_RATIO * floor)
     verdict = "EXCLUDE" if (sec8a or sec8b) else "PASS"
     return {

@@ -23,6 +23,8 @@ COPY Makefile README.md LICENSE CITATION.cff ./
 COPY bin ./bin
 COPY fdes ./fdes
 COPY detectors ./detectors
+COPY examples ./examples
+COPY tests ./tests
 COPY expected ./expected
 
 # data/ (Zenodo download) and out/ (results) are volumes so they survive the container.
