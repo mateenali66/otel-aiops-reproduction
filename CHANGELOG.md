@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.3.2] - 2026-09-04
+
+### Fixed
+
+- **A coarse bucket could condemn a detector that alerts briefly and often.** Found by an
+  adversarial reviewer who was asked to break the curve and did. The alerted rate this tool
+  reports is bucket occupancy, not duty cycle. A window shorter than the bucket claims the
+  whole bucket, so at a coarse bucket a detector that alerts briefly reads exactly like one
+  that alerts continuously.
+
+  Their case: six one-hour incidents over thirty days, all six caught in full, plus six
+  one-minute false alarms a day. The detector is in an alerting state 1.25 percent of the
+  time against a prevalence of 0.83 percent, so it alerts 1.5 times as often as anything is
+  wrong. At 1m, 5m and 15m it passed. At 1h every one-minute alarm claimed a whole bucket,
+  the alerted rate read 0.25 against a bar of 0.129, and it was excluded with a report
+  stating it alerted 30 times as often as anything was wrong. That was false by a factor of
+  twenty, and it was the most confident sentence in the report.
+
+  Before excluding, the guard's own rule is now applied to the raw alert and incident
+  durations, which no bucket has touched. If it does not fire there, the exclusion belongs
+  to the bucket size rather than to the detector and is not applied. No new constant: it is
+  the same rule on unbucketed inputs. A genuinely saturated detector has a duty cycle close
+  to its bucketed rate, so it still excludes at every bucket, and that is tested both ways.
+  `check_result.json` gains `alert_duty_cycle`, `incident_duty_cycle`,
+  `alert_rate_quantised` and `alert_windows`. Alerts mode only, since scores mode has no
+  durations to read.
+
+  The notice gives the duty cycle, the true ratio, the alert count and the precision. The
+  count matters because this detector pages 186 times in thirty days at a precision of
+  0.033, and how often a detector pages is a different question from how much time it
+  occupies. The guard settles neither, and the notice says so rather than implying the
+  detector is fine.
+
+- **The ratio notice contradicted the quantisation notice.** Same failure as the 1.3.1 fix,
+  found while fixing this one. When the rate is a bucketing artefact, the quantisation
+  notice already gives the ratio and explains why it cannot be read at face value, so the
+  ordinary ratio notice underneath it stated the opposite about the same number. It is now
+  suppressed in that case.
+
+### Added
+
+- **An exclusion close to the bar says how close.** Asked for by the same reviewer. At a
+  prevalence of 0.01 a rate of 0.146 against a bar of 0.141 is 3.5 percent over, and nothing
+  in the text let a reader see that. Within `NEAR_BAR_BAND` (0.10) the reason now names the
+  margin and says a small change in either file could move it.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. All six bundled examples keep their documented exit codes.
+198 tests pass.
+
 ## [1.3.1] - 2026-09-04
 
 ### Fixed

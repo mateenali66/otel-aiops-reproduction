@@ -701,6 +701,24 @@ Reading the alerted rate closes the hole without reopening the original defect.
 detector alerting on 1 percent of the time with perfect recall is ten times prevalence and
 well clear of it. What the curve no longer permits is a ratio of two hundred.
 
+**The alerted rate is bucket occupancy, and the guard knows the difference.** A window
+shorter than the bucket claims the whole bucket, so at a coarse bucket a detector that
+alerts briefly and often reads exactly like one that alerts continuously. A detector
+catching six one-hour incidents in full, plus six one-minute false alarms a day, is in an
+alerting state 1.25 percent of the time against a prevalence of 0.83 percent, so it alerts
+1.5 times as often as anything is wrong. At an hourly bucket every one-minute alarm claims a
+whole bucket, the alerted rate reads 0.25, and the guard excluded it while stating that it
+alerted 30 times as often as anything was wrong. That sentence was false and it was the most
+confident sentence in the report.
+
+So before the guard excludes, the same rule is applied to the raw alert and incident
+durations, which no bucket has touched. If it does not fire there, the exclusion belongs to
+the bucket size you picked rather than to the detector, and it is not applied. The report
+says so, gives the duty cycle and the true ratio, and points you at a bucket close to your
+shortest alert. It also gives the alert count and the precision, because how many times a
+detector pages is a different question from how much time it occupies, and the guard settles
+neither. This applies in alerts mode only, since scores mode has no durations to read.
+
 **The bar stays stricter than the baseline it exists to catch.** At full recall the guard
 fires below a precision of the square root of half the prevalence, and that sits above
 prevalence, which is the precision flagging everything achieves, for every prevalence under
@@ -1066,7 +1084,7 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.3.1},
+  version   = {1.3.2},
   publisher = {Zenodo},
   year      = {2026},
   doi       = {10.5281/zenodo.22309755}
