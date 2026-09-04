@@ -1144,12 +1144,12 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   version   = {1.3.7},
   publisher = {Zenodo},
   year      = {2026},
-  doi       = {10.5281/zenodo.22309755}
+  doi       = {10.5281/zenodo.22311974}
 }
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.22309755](https://doi.org/10.5281/zenodo.22309755) (v1.3.0, concept DOI
+[10.5281/zenodo.22311974](https://doi.org/10.5281/zenodo.22311974) (v1.3.7, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,
