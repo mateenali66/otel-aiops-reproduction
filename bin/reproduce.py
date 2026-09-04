@@ -582,7 +582,7 @@ def cmd_check(args) -> None:
     # the text saying so. A suppressed UNSTABLE exits as UNSTABLE.
     if result.get("results", {}).get("sweep_suppressed_unstable"):
         sys.exit(VERDICT_EXIT_CODES["UNSTABLE"])
-    if result["verdict"] == "PASS" and result.get("results", {}).get("pass_qualified"):
+    if result["verdict"] == "PASS" and result.get("pass_qualified"):
         sys.exit(QUALIFIED_PASS_EXIT)
     sys.exit(VERDICT_EXIT_CODES[result["verdict"]])
 

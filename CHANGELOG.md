@@ -1,5 +1,75 @@
 # Changelog
 
+## [1.3.6] - 2026-09-04
+
+### Fixed
+
+- **The alerts-per-incident denominator was a formatting property of the incident file.** The
+  worst defect in this release and it was not adversarial. Row count is how a tracker chose
+  to write an outage, not a fact about the world. One tracker writes one row per incident,
+  another one row per affected service, another one row per status update. The same two
+  one-hour incidents written as forty three-minute rows moved alerts per incident from 355 to
+  17.75 and flipped the verdict, with prevalence, alerted rate, recall, precision, F1 and
+  both duty cycles identical to the last decimal. Two teams with identical detectors and
+  identical outages got opposite answers. The denominator now counts merged incident
+  stretches, joining windows closer together than the bucket size, which adds no constant
+  because the caller already chose the bucket.
+
+- **`pass_qualified` was true on runs that did not pass.** It was set from the caveats alone
+  with no reference to the verdict, so every EXCLUDE carried it. Anyone reading the JSON
+  instead of the exit code read an exclusion as a qualified pass. Introduced in 1.3.5 and
+  found the same day.
+
+- **`pass_qualified` was only nested under `results`.** The whole point is letting automation
+  branch on it, and `result["pass_qualified"]` returned nothing. It now sits next to
+  `verdict`.
+
+- **Exit 5 was undocumented, and the documented contract failed the good detector.** The
+  README still listed 0, 2, 3 and 4. A continuous integration job written from it would fail
+  on the detector this tool exists to keep, because that detector exits 5. There is now an
+  exit-code table, and it says plainly that whether 5 should fail a build is the reader's
+  decision. The `--no-sweep` description was also still wrong: it holds the reported verdict,
+  not the exit code.
+
+### Changed
+
+- **The volume notice gives an absolute rate and stops implying things it cannot know.**
+  Three corrections from someone who owns a pager. A ratio alone cannot be compared against a
+  shift, so the notice now gives alerts per day and per eight-hour shift. An alert window is
+  not a page, because real stacks deduplicate and group, and the notice now says the export
+  does not tell you which. And the bucket-level precision sat in the same paragraph where it
+  reads as the fraction of useful pages, which it is not, so the notice now says what it
+  actually measures and that at most one window per incident stretch can be a first page.
+
+- **A volume within 10 percent of the limit says so.** The neighbouring guard already prints
+  proximity language and this had none, which matters more here because one real production
+  stack landed at 49.47 against a limit of 50.
+
+- **The leverage cap is described honestly.** It was presented as one of two independent
+  gates. It is not. Leverage is roughly the bucket divided by the window, so it is
+  denominated in the same quantisation it polices, and it has never bound on anything except
+  two degenerate exports at 300 and 370. It is a floor against nonsense exports and the
+  README now says so.
+
+### Known and not fixed
+
+- **The limit of 50 still has a step, and a detector at 49 can pass that should not.** 588
+  alerts against 12 incidents, precision 0.020, 19.6 pages a day, 98 percent of pages false.
+  The mechanism is that the denominator is a count, so short incidents buy the same alert
+  budget as long ones and short incidents are the common case. Merged stretches fix the
+  formatting half of this and not the short-incident half. Recorded rather than papered over.
+- **Alert volume does not reach scores mode.** There are no discrete alert windows in a score
+  series. Threshold up-crossings would give an equivalent count and are not implemented, so
+  the check this release was built around covers one of the two modes.
+- The 50 rests on four reference points, one of them a real stack sitting 1.1 percent under
+  it. That is a weaker basis than the guard curve has.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 218 tests pass.
+
 ## [1.3.5] - 2026-09-04
 
 Two reviewers reported on the same day and reached the same conclusion from opposite ends.

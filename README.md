@@ -256,7 +256,8 @@ The pilot path evaluates any detector under the FDES procedure on the archived t
    python bin/reproduce.py pilot --detector my_module:MyDetector --signal metrics --fold 1
    ```
 
-   Exit code 0 means PASS, 2 means EXCLUDE under section 8 and 3 means INSUFFICIENT. A
+   Exit code 0 means PASS, 2 means EXCLUDE under section 8, 3 means INSUFFICIENT and 5
+   means PASS with a caveat, described under "Exit codes" below. A
    failure exits 1 and no verdict uses that code, so an exit of 2 is a rejected detector
    and not a crash. The report (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its
    reference value. `pilot_result.json` has the numbers, the fold assignment and the
@@ -362,6 +363,28 @@ make check ALERTS=my_alerts.csv INCIDENTS=my_incidents.csv BUCKET=5m \
 make check SCORES=my_scores.csv INCIDENTS=my_incidents.csv BUCKET=5m \
   FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z THRESHOLD=0.82
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | `PASS`, with nothing held back |
+| 1 | A usage error. The command was wrong. This is not a verdict |
+| 2 | `EXCLUDE` |
+| 3 | `INSUFFICIENT`, the input cannot support a verdict |
+| 4 | `UNSTABLE`, the verdict is not stable across bucket sizes |
+| 5 | `PASS`, but something was held back |
+
+**Read 5 carefully, and do not assume a plain `PASS` where you see it.** A run exits 5 when
+the verdict is `PASS` and either an exclusion was suppressed because the alerted rate was a
+bucketing artefact, or the detector alerted far more often than there were incidents to
+find. `pass_qualified` in `check_result.json`, next to `verdict`, says the same thing, and
+the report says which caveat applies and why.
+
+Whether 5 should fail a build is your decision and not this tool's. It is a pass whose
+caveat you have to read. A detector that alerts briefly and occasionally can legitimately
+exit 5, so treating 5 as a hard failure will reject working detectors, and treating it as 0
+will let through a detector that pages more often than anyone would read.
 
 Exit code 0 means PASS, 2 means EXCLUDE, 3 means INSUFFICIENT and 4 means UNSTABLE. The run
 writes `out/check/<name>/check_result.json` and `check_report.md`.
@@ -507,7 +530,10 @@ gave `PASS` or `EXCLUDE` are compared. A bucket size that comes out `INSUFFICIEN
 listed and left out of the comparison, because it says there was nothing to measure there,
 not that the answer flipped.
 
-`--no-sweep` turns it off and gives you the single-bucket verdict and its exit code back.
+`--no-sweep` holds the reported verdict at the bucket you passed. It does not give you that
+bucket's exit code back. A suppressed `UNSTABLE` still exits 4, because a flag that chooses
+which verdict is printed must not also decide whether a script sees a failure.
+`sweep_suppressed_unstable` in `check_result.json` tells the two apart.
 The sweep is four extra runs of arithmetic on the same arrays, so it costs nothing worth
 saving. `SWEEP_BUCKETS` in `fdes/byod.py` sets the ladder. The sweep is alerts mode only:
 in scores mode the operating point moves with the bucket as well as the bucket boundaries,
@@ -737,6 +763,37 @@ reader as a judgement about their own on-call load.
 The guard applies in both modes, and in scores mode it applies at whatever operating point
 the threshold produces, so a score that ranks buckets well still cannot reach `PASS` while
 its operating point flags most of the timeline.
+
+**Alert volume, and what still is not measured.** Nothing in the checks above reads how
+often a detector pages. The guard reads how much of the timeline it occupies, and a detector
+that fires constantly in short bursts occupies very little of it, so a run can clear every
+check here while paging more often than anyone would read. The report gives the alerts per
+incident, the alerts per day, the window count and the incident stretch count, and says
+plainly that it is not deciding for you.
+
+Two limits on that, both raised by people who own pagers. An alert window is not a page,
+because real stacks deduplicate and group, and the export does not say which it is. And the
+precision reported in the check table is measured per bucket, so it is not the fraction of
+pages that were worth reading.
+
+`ALERTS_PER_INCIDENT_LIMIT` is 50 and it is a weaker number than the guard curve. The known
+reference points are one detector at 31 that is worth keeping and two at 176 and 355 that are
+not, plus one real production stack at 49.47, which misses the limit by about half an alert.
+A run inside 10 percent of the limit says so. The denominator counts merged incident
+stretches rather than rows, because row count is a formatting property of an export: the same
+two outages written as forty rows instead of two used to move the ratio from 355 to 17.75 and
+flip the verdict with every other number identical.
+
+**This check does not reach scores mode.** There are no discrete alert windows in a score
+series, so there is nothing to count. Threshold up-crossings would give an equivalent and
+they are not implemented. A scores-mode `PASS` therefore rests on fewer checks than an
+alerts-mode one, in this respect as well as in section 8a.
+
+**On the leverage cap.** `SUPPRESSION_MAX_LEVERAGE` is not an independent gate and should not
+be read as one. Leverage is roughly the bucket divided by the window, so it only answers
+whether the windows are very short relative to this bucket, and it is denominated in the same
+quantisation it is meant to police. It caught two degenerate exports at 300 and 370 and has
+never bound on anything else. It is a floor against nonsense exports and nothing more.
 
 **Known limit, and where the evidence actually sits.** Two production observability
 exports have been run through this, one on Datadog and one on Splunk. On the Datadog export
@@ -1084,7 +1141,7 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.3.5},
+  version   = {1.3.6},
   publisher = {Zenodo},
   year      = {2026},
   doi       = {10.5281/zenodo.22309755}

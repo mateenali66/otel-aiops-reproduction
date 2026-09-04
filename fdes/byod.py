@@ -612,6 +612,44 @@ def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dic
     return out
 
 
+def merged_stretches(grid: dict, starts: np.ndarray, ends: np.ndarray,
+                     gap_seconds: int) -> int:
+    """How many separate stretches these windows cover, after joining ones that touch.
+
+    Row count is a formatting property of an export, not a fact about the world. One outage
+    is written as one row by one tracker, as one row per affected service by another, and as
+    one row per status update by a third. Two teams with identical detectors and identical
+    outages should not get opposite verdicts because of that, and before this they did: the
+    same two one-hour incidents written as forty three-minute rows moved the alerts per
+    incident from 355 to 17.75 with prevalence, alerted rate, recall, precision, F1 and both
+    duty cycles all identical to the last decimal.
+
+    Windows closer together than gap_seconds are treated as one stretch. The gap defaults to
+    the bucket size, which the caller has already chosen, so this adds no constant of its
+    own. It is a statement about the shape of the ground truth rather than about detector
+    quality.
+    """
+    lo, hi = int(grid["t_from"]), int(grid["t_to"])
+    if not len(starts):
+        return 0
+    a = np.clip(np.asarray(starts, dtype=np.int64), lo, hi)
+    b = np.clip(np.asarray(ends, dtype=np.int64), lo, hi)
+    keep = b >= a
+    a, b = a[keep], b[keep]
+    if not len(a):
+        return 0
+    order = np.argsort(a, kind="stable")
+    a, b = a[order], b[order]
+    stretches, cur_b = 1, b[0]
+    for x, y_ in zip(a[1:], b[1:]):
+        if x <= cur_b + gap_seconds:
+            cur_b = max(cur_b, y_)
+        else:
+            stretches += 1
+            cur_b = y_
+    return stretches
+
+
 def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
                         i_start: np.ndarray, i_end: np.ndarray) -> float | None:
     """How many times this detector alerted for each incident there was to find.
@@ -631,24 +669,43 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
     Counted on windows that touch the range, so neither file is charged for rows outside it.
     """
     _, a_touch = clip_to_range(grid, a_start, a_end)
-    _, i_touch = clip_to_range(grid, i_start, i_end)
-    incidents = int(i_touch.sum())
+    incidents = merged_stretches(grid, i_start, i_end, int(grid["bucket_seconds"]))
     if incidents <= 0:
         return None
     return float(int(a_touch.sum())) / float(incidents)
 
 
 def alert_volume_notice(res: dict) -> str:
+    """Both the ratio and the absolute rate, because a ratio alone cannot be acted on.
+
+    Someone who owns the pager asked for three things this used to get wrong. It gave a
+    ratio with no absolute rate, so there was nothing to compare against a shift. It did not
+    say that alert rows are not pages, since real stacks deduplicate and group. And it put
+    the bucket-level precision in the same paragraph, where it reads as the fraction of
+    useful pages, which it is not.
+    """
     per = res["alerts_per_incident"]
-    return (f"Alerted {per:.0f} times for every incident there was to find. Nothing above "
-            f"measures that. The flag-everything guard reads how much of the timeline the "
-            f"detector occupies, and a detector that pages constantly in short bursts "
+    day = res.get("alerts_per_day")
+    windows = res.get("alert_windows")
+    inc = res.get("incident_stretches")
+    rate = (f" That is {day:.0f} alert windows a day, or about {day / 3:.0f} in an eight "
+            f"hour shift." if day else "")
+    return (f"Alerted {per:.0f} times for every incident there was to find, "
+            f"{windows} windows against {inc} separate incident stretches.{rate} Nothing "
+            f"above measures that. The flag-everything guard reads how much of the timeline "
+            f"the detector occupies, and a detector that pages constantly in short bursts "
             f"occupies very little of it, so a run can clear every check here while paging "
-            f"far more often than anyone would read. The bucket-level precision above is "
-            f"{_fmt(res['precision'], 3)}. Whether this many pages is worth it is a "
-            f"judgement about your on-call load, and this procedure does not make it. It "
-            f"reports the number so the judgement is yours and not an accident of which "
-            f"checks happen to exist.")
+            f"far more often than anyone would read.\n\n"
+            f"Two things this cannot tell you. An alert window is not a page. Real stacks "
+            f"deduplicate and group, so these windows could be a handful of signals flapping "
+            f"or they could be that many separate interruptions, and the export does not "
+            f"say which. And the precision reported above, {_fmt(res['precision'], 3)}, is "
+            f"measured per bucket and is not the fraction of pages that were worth reading. "
+            f"With {windows} windows and {inc} incident stretches, at most {inc} of those "
+            f"windows can be the first page for a real incident.\n\n"
+            f"Whether this many pages is worth it is a judgement about your on-call load, "
+            f"and this procedure does not make it. It reports the numbers so the judgement "
+            f"is yours and not an accident of which checks happen to exist.")
 
 
 def dominant_alert_notice(res: dict) -> str:
@@ -860,6 +917,9 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     a_duty = duty_cycle(grid, a_start, a_end)
     i_duty = duty_cycle(grid, i_start, i_end)
     a_per_inc = alerts_per_incident(grid, a_start, a_end, i_start, i_end)
+    _, a_touch_sw = clip_to_range(grid, a_start, a_end)
+    a_per_day = float(int(a_touch_sw.sum())) / max(1e-9, float(grid["span_seconds"]) / 86400.0)
+    i_stretch = merged_stretches(grid, i_start, i_end, int(grid["bucket_seconds"]))
     wanted = sorted({parse_duration(b) for b in SWEEP_BUCKETS} | {grid["bucket_seconds"]})
     rows, skipped = [], []
     for w in wanted:
@@ -874,7 +934,8 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
                                 truth_rows=i_note["rows"], truth_coverage=i_cov,
                                 alert_rows=a_note["rows"], alert_coverage=a_cov,
                                 alert_duty=a_duty, truth_duty=i_duty,
-                                per_incident=a_per_inc)
+                                per_incident=a_per_inc, per_day=a_per_day,
+                                stretches=i_stretch)
         rows.append({
             "bucket": fmt_bucket(w),
             "bucket_seconds": w,
@@ -1085,7 +1146,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
               alert_coverage: dict | None = None,
               alert_duty: float | None = None,
               truth_duty: float | None = None,
-              per_incident: float | None = None) -> tuple[dict, list[dict]]:
+              per_incident: float | None = None,
+              per_day: float | None = None,
+              stretches: int | None = None) -> tuple[dict, list[dict]]:
     """Apply the FDES checks to one bucketed timeline.
 
     Returns the computed values and the list of things that were not computable, each with
@@ -1373,6 +1436,15 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alerts_per_incident"] = round(per_incident, 2) if per_incident is not None else None
     computed["suppression_max_leverage"] = SUPPRESSION_MAX_LEVERAGE
     computed["alerts_per_incident_limit"] = ALERTS_PER_INCIDENT_LIMIT
+    computed["alerts_per_day"] = round(per_day, 2) if per_day is not None else None
+    computed["incident_stretches"] = stretches
+    # The neighbouring guard says how close a call was and this had no equivalent, which
+    # matters more here because one real production stack landed at 49.47 against a limit
+    # of 50, missing it by about half an alert.
+    computed["alert_volume_near_limit"] = bool(
+        per_incident is not None
+        and ALERTS_PER_INCIDENT_LIMIT * (1.0 - NEAR_BAR_BAND)
+        <= per_incident <= ALERTS_PER_INCIDENT_LIMIT * (1.0 + NEAR_BAR_BAND))
     # Nothing else here measures how often the detector pages, and a PASS can be carried by
     # a detector alerting hundreds of times per incident without any check touching it.
     computed["high_alert_volume"] = bool(
@@ -1390,11 +1462,15 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # suppressed exclusion, the other a PASS on a detector paging 174 times a day, and both
     # said the same thing: the exit code carried none of it. A reader who only sees the code
     # cannot tell a clean PASS from one with a caveat attached.
-    computed["pass_qualified"] = bool(quantised or computed.get("high_alert_volume"))
+    caveat = bool(quantised or computed.get("high_alert_volume"))
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
     else:
         computed["verdict"] = "EXCLUDE" if reasons else "PASS"
+    # This is a statement about a PASS. It was set with no reference to the verdict, so
+    # every EXCLUDE carried it too and anyone reading the JSON instead of the exit code read
+    # an exclusion as a qualified pass.
+    computed["pass_qualified"] = bool(caveat and computed["verdict"] == "PASS")
     return computed, not_computed
 
 
@@ -1441,7 +1517,12 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       alert_duty=duty_cycle(grid, a_start, a_end),
                                       truth_duty=duty_cycle(grid, i_start, i_end),
                                       per_incident=alerts_per_incident(
-                                          grid, a_start, a_end, i_start, i_end))
+                                          grid, a_start, a_end, i_start, i_end),
+                                      per_day=float(int(
+                                          clip_to_range(grid, a_start, a_end)[1].sum()))
+                                      / max(1e-9, float(grid["span_seconds"]) / 86400.0),
+                                      stretches=merged_stretches(
+                                          grid, i_start, i_end, int(grid["bucket_seconds"])))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
@@ -1703,6 +1784,9 @@ def assemble(mode: str, grid: dict, computed: dict, not_computed: list[dict],
         "path": "bring your own data",
         "mode": mode,
         "verdict": computed["verdict"],
+        # Promoted out of results. A script branching on the verdict needs the caveat in the
+        # same place, and result["pass_qualified"] returned None while it was only nested.
+        "pass_qualified": computed.get("pass_qualified", False),
         "bucketing": grid,
         "inputs": inputs,
         "coverage": coverage,
@@ -2181,7 +2265,7 @@ def render_report(r: dict) -> str:
         if block:
             lines += block + [""]
 
-    if res.get("high_alert_volume"):
+    if res.get("high_alert_volume") or res.get("alert_volume_near_limit"):
         lines += [alert_volume_notice(res), ""]
 
     if res.get("alert_concentration", {}).get("dominated"):
