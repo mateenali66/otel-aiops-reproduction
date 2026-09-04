@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.2.0] - 2026-09-04
 
 ### Changed
 - **The alerted-rate guard now has two ways in.** It was `rate >= 0.5 AND rate >= 4 x p`,
@@ -414,3 +414,9 @@
   it is left for a spec-level decision rather than settled here. The guard refuses rather
   than passes, and the report prints `score_spread` and `distinct_scores` so the call can
   be checked. Centring the series works around it.
+
+## [1.1.0] - 2026-08-31
+
+The state of the package before the bring-your-own-data path existed. Published at
+[10.5281/zenodo.22185619](https://doi.org/10.5281/zenodo.22185619). No changelog was kept
+before this point, so the 1.2.0 entry above is the first one.
