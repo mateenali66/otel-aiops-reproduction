@@ -641,9 +641,11 @@ def main() -> None:
                    help="name the optional service or scope column in the incidents CSV. "
                         "Defaults to --scope-col.")
     s.add_argument("--no-sweep", action="store_true",
-                   help="in alerts mode, do not re-run the check at other bucket sizes. "
-                        "The sweep is on by default because a coarse bucket can move the "
-                        "verdict on its own.")
+                   help="in alerts mode, hold the verdict and the exit code at the bucket "
+                        "you passed. The sweep still runs and the report still shows it, so "
+                        "a run that would have been UNSTABLE says so instead of coming back "
+                        "as a clean PASS. The sweep decides the verdict by default because "
+                        "a coarse bucket can move it on its own.")
     s.add_argument("--label", default=None, help="subdirectory name under --out")
     s.add_argument("--out", default=str(OUT_DIR / "check"))
     s.set_defaults(fn=cmd_check)

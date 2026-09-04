@@ -22,7 +22,8 @@ import sys  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from fdes import protocol  # noqa: E402
-from fdes.checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_SATURATION,  # noqa: E402
+from fdes.checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_RATIO_FLOOR,  # noqa: E402
+                         ALERT_RATE_RATIO_MULTIPLE, ALERT_RATE_SATURATION,
                          CSV_FIELDS, NOT_EVALUABLE, alert_rate_saturated, check_row,
                          checks_from_scores)
 
@@ -220,8 +221,8 @@ class TestAlertRateGuard(unittest.TestCase):
         # short of the saturation bar and keeps its verdict.
         self.assertFalse(alert_rate_saturated(0.01, 0.001))
 
-    def test_both_conditions_have_to_hold(self):
-        p = 0.05
+    def test_both_of_path_a_s_conditions_have_to_hold(self):
+        p = 0.1
         just_under_the_rate = ALERT_RATE_SATURATION - 0.01
         self.assertFalse(alert_rate_saturated(just_under_the_rate, p))
         self.assertTrue(alert_rate_saturated(ALERT_RATE_SATURATION, p))
@@ -229,6 +230,49 @@ class TestAlertRateGuard(unittest.TestCase):
         # more than the data warrants.
         self.assertFalse(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE + 0.01))
         self.assertTrue(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE))
+
+    def test_path_a_s_multiple_is_inert_at_any_realistic_prevalence(self):
+        # 4 x 0.125 = 0.5, so under a prevalence of 0.125 the multiple is implied by the
+        # rate and path A collapses to "alerts more than half the time". Real incident data
+        # is essentially never above 0.125. This is why path B exists.
+        crossover = ALERT_RATE_SATURATION / ALERT_RATE_MULTIPLE
+        self.assertAlmostEqual(crossover, 0.125, places=6)
+        for p in (0.001, 0.02, 0.0397, 0.043, 0.1):
+            self.assertLess(ALERT_RATE_MULTIPLE * p, ALERT_RATE_SATURATION, p)
+
+    def test_path_b_catches_the_real_case_path_a_let_through(self):
+        # Measured on the second real run. 40 percent of a fourteen day timeline alerted
+        # where 3.97 percent of it was anomalous, so 10.1 times as often as anything was
+        # wrong. Under path A alone this passed with the best F1 in the table.
+        self.assertLess(0.400, ALERT_RATE_SATURATION)
+        self.assertGreaterEqual(0.400, ALERT_RATE_RATIO_FLOOR)
+        self.assertGreaterEqual(0.400 / 0.0397, ALERT_RATE_RATIO_MULTIPLE)
+        self.assertTrue(alert_rate_saturated(0.400, 0.0397))
+
+    def test_the_step_function_at_the_old_floor_is_gone(self):
+        # 0.499 passed and 0.500 excluded, with nothing between prevalence and 0.5 making
+        # any difference. Both sides of that step now fire.
+        for rate in (0.499, 0.500):
+            self.assertTrue(alert_rate_saturated(rate, 0.0397), rate)
+
+    def test_path_b_leaves_the_rare_incident_detector_alone(self):
+        # The case path A's absolute floor was protecting, now protected by path B's.
+        # Ten times prevalence, and a twentieth of the lower floor.
+        self.assertGreaterEqual(0.01 / 0.001, ALERT_RATE_RATIO_MULTIPLE)
+        self.assertLess(0.01, ALERT_RATE_RATIO_FLOOR)
+        self.assertFalse(alert_rate_saturated(0.01, 0.001))
+
+    def test_the_band_between_the_two_paths_keeps_its_pass(self):
+        # Over the lower floor, under the ratio the lower floor asks for, and under the
+        # absolute floor of path A. A detector alerting a third of the time at five times
+        # prevalence is not condemned here.
+        self.assertFalse(alert_rate_saturated(0.33, 0.066))
+        # And right at the ratio it is.
+        self.assertTrue(alert_rate_saturated(0.33, 0.33 / ALERT_RATE_RATIO_MULTIPLE))
+
+    def test_path_b_never_reaches_a_perfect_detector(self):
+        for p in (0.001, 0.0397, 0.25, 0.6, 0.9):
+            self.assertFalse(alert_rate_saturated(p, p), p)
 
 
 class TestRecordedRun(unittest.TestCase):
