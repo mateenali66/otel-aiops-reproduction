@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.3.1] - 2026-09-04
+
+### Fixed
+
+- **Two notices contradicted each other on the same number.** Found on a real production
+  export, not on a constructed case. The alert-volume counterweight added in 1.3.0 fired on
+  a bare lift over 1.0, while the near-floor notice covers a band of `NEAR_FLOOR_BAND` (0.20)
+  either side of 1.0. A lift between 1.0 and 1.2 therefore printed both, a few lines apart:
+  "F1 is 1.04 times the predict-all floor. The detector is finding incidents" against "F1 /
+  floor is 1.04, within 20 percent of 1.0, so this detector scores about what flagging every
+  bucket would score". Scoring four percent better than flagging every bucket, while missing
+  two thirds of the incident time, is not evidence that a detector is finding incidents. It
+  was the 1.2.0 problem inverted rather than a fix for it.
+
+  The counterweight is now suppressed inside the near-floor band. It reuses
+  `NEAR_FLOOR_BAND` rather than introducing a second constant, so the two notices cannot
+  overlap by construction. Above the band nothing changes. The tests sweep the lift through
+  the whole band and assert the sweep actually reaches it, so they cannot go quiet if the
+  construction drifts.
+
+- **The documented install line printed a warning that looks like a corrupt download.**
+  `git clone --depth 1 --branch v1.3.0` emitted `warning: refs/tags/v1.3.0 ... is not a
+  commit!` before anything else. Nothing was wrong and it resolved to the right commit, but
+  it was the first thing a new reader saw. It is git's shallow-clone handling of an
+  annotated tag object. Release tags are lightweight from 1.3.1 on, which clones clean.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 195 tests pass.
+
 ## [1.3.0] - 2026-09-04
 
 Two independent reviewers ran v1.2.0 against the exports that had produced its defects and

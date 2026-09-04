@@ -367,6 +367,59 @@ class TestAlertRateCurve(TempCase):
             self.assertNotIn("excluded on alert volume",
                              " ".join(res["exclusion_reasons"]))
 
+    def partial_recall(self, incident_minutes: int, caught: int, clean: int):
+        """A detector that catches part of the incident and alerts a lot of clean time.
+
+        `at_rate` above always catches the incident whole, so recall is 1.0 and the lift
+        never comes down near the floor. The overlap this exercises needs partial recall,
+        which is the shape the real export had.
+        """
+        i_end_h, i_end_m = divmod(2 * 60 + incident_minutes, 60)
+        incidents = write(self.tmp, "partial.csv",
+                          f"start,end\n2026-03-01T02:00:00Z,"
+                          f"2026-03-01T{i_end_h:02d}:{i_end_m:02d}:00Z\n")
+        c_end_h, c_end_m = divmod(6 * 60 + clean, 60)
+        caught_h, caught_m = divmod(2 * 60 + caught, 60)
+        return self.alerts(
+            f"2026-03-01T02:00:00Z,2026-03-01T{caught_h:02d}:{caught_m:02d}:00Z\n"
+            f"2026-03-01T06:00:00Z,2026-03-01T{c_end_h:02d}:{c_end_m:02d}:00Z\n",
+            incidents=incidents, sweep=False)
+
+    def test_the_counterweight_and_the_near_floor_notice_never_both_fire(self):
+        # Found on real data. The counterweight started at a bare lift of 1.0 and the
+        # near-floor notice covers a band of 0.20 either side of 1.0, so a lift between
+        # 1.0 and 1.2 printed both, a few lines apart, about the same number, saying
+        # opposite things: "the detector is finding incidents" against "scores about what
+        # flagging every bucket would score". Inside that band the near-floor sentence is
+        # the honest one. This sweep walks the lift through the whole band.
+        hits = 0
+        for clean in range(400, 860, 20):
+            r = self.partial_recall(40, 21, clean)
+            res = r["results"]
+            report = byod.render_report(r)
+            volume = "excluded on alert volume" in report
+            near = "scores about what flagging every bucket would score" in report
+            self.assertFalse(volume and near,
+                             f"clean={clean} lift={res['f1_over_floor']}")
+            if res["near_floor"]:
+                hits += 1
+        # The sweep has to actually reach the band, or it proves nothing.
+        self.assertGreater(hits, 0)
+
+    def test_a_lift_just_over_the_floor_gets_the_near_floor_sentence_not_the_other(self):
+        # The shape of the real row that found this. Lift 1.05 is five percent better than
+        # flagging every single bucket, while missing about half the incident time. That
+        # is not evidence that a detector is finding incidents.
+        r = self.partial_recall(40, 21, 679)
+        res = r["results"]
+        self.assertAlmostEqual(res["f1_over_floor"], 1.05, places=2)
+        self.assertAlmostEqual(res["recall"], 0.525, places=3)
+        self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertTrue(res["near_floor"])
+        report = byod.render_report(r)
+        self.assertNotIn("excluded on alert volume", report)
+        self.assertIn("scores about what flagging every bucket would score", report)
+
     def test_the_step_at_the_old_floor_is_gone(self):
         # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
         for buckets in (719, 720):
