@@ -1,5 +1,72 @@
 # Changelog
 
+## [1.3.7] - 2026-09-04
+
+### Fixed
+
+- **The merge tolerance made a count of incidents depend on the bucket size, and it broke
+  the sweep.** This was a defect in yesterday's fix rather than in anything older. The merge
+  was given the bucket size as its gap tolerance, on the reasoning that the caller had
+  already chosen that number so it introduced no constant of its own. That was the wrong
+  category. Prevalence depends on the bucket because it is defined as a bucket-level rate.
+  How many incidents there were is a fact about the world and must not.
+
+  Twelve incident rows counted as twelve stretches at a five minute bucket and six at an
+  hourly one, so alerts per incident doubled on bucket size alone. The sweep is worse,
+  because it computes the denominator once and applies it to every row of the ladder, so the
+  entire sweep table moved with whichever bucket the user happened to pass. The same two
+  files gave a PASS headline over four passing rows from one bucket and an UNSTABLE headline
+  over three excluding rows from another, with every printed number identical between the two
+  tables. The sweep exists to answer whether a verdict belongs to the detector or to the
+  chosen bucket, and it had started answering with a table that depended on the chosen
+  bucket.
+
+  The tolerance is now zero, so only windows that touch or overlap are joined. Measured, this
+  costs nothing: the case that motivated merging at all collapses from forty rows to two
+  stretches at every tolerance from zero to an hour. The bucket-linked value bought nothing
+  that zero does not, and it bought bucket dependence. The quantity is now genuinely
+  bucket-free, which also makes the sweep's hoist correct rather than merely convenient.
+
+### Changed
+
+- **The limit is described as a floor against absurdity, not a quality threshold.** A run at
+  49 and a run at 50 are not meaningfully different and the notice now says so in those
+  words. What the limit catches is the far end, where a detector alerts hundreds or thousands
+  of times per incident, and that is not a judgement call. This follows the same correction
+  made to the leverage cap: say what a number actually does rather than letting a reader
+  infer more from it.
+
+- **The notice says where its denominator came from and what moves it.** It now names the
+  merge explicitly, as stretches merged from the rows you supplied, rather than leaving that
+  connection a paragraph away. And it states that the denominator moves with how long you
+  assume an incident lasted: on one real export, capping incident windows at an hour against
+  leaving them uncapped moved the ratio by a factor of seventeen while the decision to report
+  it stayed the same at every setting. Read the flag, do not quote the number to two figures.
+
+- **Scores mode says it cannot measure alert volume.** It was silent. A score series has one
+  row per timestamp and no discrete alert windows to count. Threshold up-crossings would be
+  the equivalent and are deliberately not implemented, because on a run whose threshold was
+  tuned on the same data the count would inherit that tuning and read better than it is,
+  which is the defect the existing tuned-operating-point caveat already describes. The gap is
+  now stated in "what this run could not compute" rather than left for a reader to discover.
+
+### Known and not fixed, with the reasoning recorded
+
+- **A detector at 49 alerts per incident can still pass when it should not.** An incident is
+  being used as a unit of budget regardless of how much was actually wrong, so twelve
+  five-minute incidents buy the same allowance as twelve five-hour ones. The obvious fix is
+  to normalise by incident duration instead of count. That was tested rather than assumed,
+  and it is worse: it swings by a factor of thirty-eight against seventeen, because
+  duration-normalisation inherits the incident-window-length uncertainty twice, once in the
+  merge and once in the divisor. Switching to incident time also just re-derives prevalence,
+  which the guard already uses. This is deferred on measurement, not on inattention.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 219 tests pass.
+
 ## [1.3.6] - 2026-09-04
 
 ### Fixed
