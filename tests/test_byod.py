@@ -522,6 +522,71 @@ class TestAlertRateCurve(TempCase):
         for row in rows:
             self.assertEqual(row["verdict"], "PASS", row["bucket"])
 
+    def abusive(self, window_seconds: int, rows: int = 5184, zero_share: float = 0.0):
+        """Many short alert windows. The shape that walks through the suppression."""
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = [(t0 + _dt.timedelta(days=5 * k, hours=10),
+                t0 + _dt.timedelta(days=5 * k, hours=11)) for k in range(6)]
+        al = []
+        for m in range(rows):
+            st = t0 + _dt.timedelta(minutes=m * 5)
+            zero = zero_share and (m % max(1, int(round(1 / zero_share))) == 0)
+            al.append((st, st if zero else st + _dt.timedelta(seconds=window_seconds)))
+        incidents = write(self.tmp, f"ab_i_{window_seconds}.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, f"ab_a_{window_seconds}_{rows}.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        return byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                                 sweep=False)
+
+    def test_short_windows_cannot_buy_their_way_out_of_the_guard(self):
+        # The gate before this one counted rows where end equals start, and a one-second
+        # window walks straight past that. Most real exports emit an end time. This detector
+        # pages 173 times a day at a precision of 0.014 and used to come back PASS at exit 0
+        # with no check firing at all.
+        for seconds in (1, 6, 30):
+            r = self.abusive(seconds)
+            res = r["results"]
+            self.assertFalse(res["alert_rate_quantised"], seconds)
+            self.assertEqual(r["verdict"], "EXCLUDE", seconds)
+        # A fifth of the rows being zero-length does not help either.
+        self.assertEqual(self.abusive(1, zero_share=0.19)["verdict"], "EXCLUDE")
+
+    def test_the_duty_cycle_alone_cannot_separate_the_two_cases(self):
+        # This is why the count gate exists. The abuser occupies LESS time than the
+        # legitimate detector, so ranked by duty cycle it looks better behaved. Any gate
+        # built on duty cycle or window length alone ranks these two the wrong way round.
+        good = self.oncall("1h")["results"]
+        bad = self.abusive(1)["results"]
+        self.assertLess(bad["alert_duty_cycle"], good["alert_duty_cycle"])
+        self.assertGreater(bad["alerts_per_hour"], good["alerts_per_hour"] * 20)
+        self.assertEqual(self.oncall("1h")["verdict"], "PASS")
+
+    def test_neither_suppression_gate_holds_on_its_own(self):
+        # Tuning the windows to sit under the leverage cap pushes the rate per hour over,
+        # and thinning the alerts to get under the rate per hour pushes the leverage over.
+        tuned = self.abusive(6)["results"]
+        self.assertLessEqual(tuned["alert_rate_leverage"], byod.SUPPRESSION_MAX_LEVERAGE)
+        self.assertGreater(tuned["alerts_per_hour"], byod.SUPPRESSION_MAX_ALERTS_PER_HOUR)
+        self.assertFalse(tuned["alert_rate_quantised"])
+        thin = self.abusive(1, rows=719)["results"]
+        self.assertLessEqual(thin["alerts_per_hour"], byod.SUPPRESSION_MAX_ALERTS_PER_HOUR)
+        self.assertGreater(thin["alert_rate_leverage"], byod.SUPPRESSION_MAX_LEVERAGE)
+        self.assertFalse(thin["alert_rate_quantised"])
+
+    def test_the_check_table_does_not_say_pass_when_the_guard_stood_down(self):
+        # The prose said "was not applied" while the table one line below said "pass" for the
+        # same check, and a skimmer reads the table.
+        report = byod.render_report(self.oncall("1h"))
+        row = [l for l in report.splitlines()
+               if l.startswith("| Alerted rate against prevalence")]
+        self.assertEqual(len(row), 1)
+        self.assertIn("not applied", row[0])
+        self.assertNotIn("| pass |", row[0])
+
     def test_point_events_cannot_buy_their_way_out_of_the_guard(self):
         # The suppression is a way out of an exclusion, so it has to be narrow. It compares
         # the bucketed rate against a duty cycle, and the duty cycle skips zero-length rows.
