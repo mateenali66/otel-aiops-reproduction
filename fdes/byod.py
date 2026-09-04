@@ -62,6 +62,9 @@ MIN_DISTINCT_SCORES = 3
 CONSTANT_SPREAD_RATIO = 1e-6
 # Refuse to build a grid larger than this. 5 million buckets is 9.5 years at 60 seconds.
 MAX_BUCKETS = 5_000_000
+# Overlap at or above this share of the window time gets its own line near the top of the
+# report, because at that point the input row count no longer describes the alert time.
+OVERLAP_NOTICE = 0.10
 
 _TZ_SUFFIX = re.compile(r"(?:Z|z|[+-]\d{2}:?\d{2})$")
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
@@ -293,10 +296,16 @@ def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.n
 
     A bucket is marked when the window overlaps it at all, even by one second. A
     zero-length window marks the single bucket that contains it.
+
+    Overlapping windows are unioned, because the question each bucket answers is "was this
+    bucket alerted", and two concurrent alerts on the same bucket are still one alerted
+    bucket. The union hides how much window time was absorbed, so the note counts it. On
+    real vendor exports a quarter of the alert time can sit under another alert.
     """
     n, t0, w = grid["n_buckets"], grid["t_from"], grid["bucket_seconds"]
     marked = np.zeros(n, dtype=bool)
-    fully_outside = partly_outside = 0
+    fully_outside = partly_outside = inside = 0
+    span_buckets = 0
     for s, e in zip(np.asarray(starts, dtype="int64"), np.asarray(ends, dtype="int64")):
         i0 = (int(s) - t0) // w
         i1 = -((t0 - int(e)) // w)          # integer ceil of (e - t0) / w
@@ -308,9 +317,27 @@ def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.n
             continue
         if i0 < 0 or i1 > n:
             partly_outside += 1
+        inside += 1
+        span_buckets += b - a
         marked[a:b] = True
+    covered = int(marked.sum())
+    absorbed = int(span_buckets - covered)
     return marked, {"windows_fully_outside_range": fully_outside,
-                    "windows_partly_outside_range": partly_outside}
+                    "windows_partly_outside_range": partly_outside,
+                    "windows_inside_range": inside,
+                    "distinct_stretches": count_stretches(marked),
+                    "bucket_span_before_merge": int(span_buckets),
+                    "buckets_marked": covered,
+                    "buckets_absorbed_by_overlap": absorbed,
+                    "overlap_fraction": round(absorbed / span_buckets, 4) if span_buckets else 0.0}
+
+
+def count_stretches(mask: np.ndarray) -> int:
+    """How many separate runs of marked buckets the mask holds after the union."""
+    m = np.asarray(mask).astype(np.int8)
+    if m.size == 0:
+        return 0
+    return int((np.diff(np.concatenate(([0], m, [0]))) == 1).sum())
 
 
 def bucket_scores(grid: dict, times: np.ndarray, scores: np.ndarray,
@@ -443,12 +470,65 @@ def degenerate_output(pred: np.ndarray, scores: np.ndarray | None) -> dict:
     return out
 
 
+def evaluability_blockers(y: np.ndarray, mode: str, truth_rows: int | None,
+                          truth_coverage: dict | None, alert_rows: int | None,
+                          alert_coverage: dict | None) -> list[str]:
+    """Reasons this input cannot support a verdict at all.
+
+    These are input problems, not detector problems. They are kept apart from the exclusion
+    reasons because the two say opposite things to the person running the tool. One says
+    fix your detector. This one says fix your input.
+    """
+    reasons: list[str] = []
+    n = len(y)
+    positives = int(y.sum())
+
+    if n == 0:
+        return ["The range holds no bucket, so there is nothing to evaluate."]
+
+    if positives == 0:
+        if truth_rows == 0:
+            reasons.append("The incident CSV has no rows, so there is no ground truth on this "
+                           "range and prevalence is zero. Nothing can be measured against "
+                           "nothing.")
+        elif truth_rows and truth_coverage \
+                and truth_coverage.get("windows_fully_outside_range") == truth_rows:
+            reasons.append(f"All {truth_rows} incident windows fall entirely outside the "
+                           f"evaluation range, so prevalence is zero and there is no ground "
+                           f"truth to measure against. Check --from and --to against the "
+                           f"incident CSV.")
+        else:
+            reasons.append("No bucket falls inside an incident window, so prevalence is zero "
+                           "and there is no ground truth to measure against.")
+    elif positives == n:
+        reasons.append(f"Every one of the {n} buckets falls inside an incident window, so the "
+                       f"ground truth has one class only. A detector that flags everything "
+                       f"and one that flags nothing cannot be told apart on this input.")
+
+    if mode == "alerts" and alert_rows and alert_coverage \
+            and alert_coverage.get("windows_fully_outside_range") == alert_rows:
+        reasons.append(f"All {alert_rows} alert windows fall entirely outside the evaluation "
+                       f"range, so the detector has no output inside it. Rows that all miss "
+                       f"the range point at a wrong --from and --to, not at a silent "
+                       f"detector. An alert CSV with no rows at all is read as a silent "
+                       f"detector and does get a verdict.")
+    return reasons
+
+
 def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
-              scores: np.ndarray | None, contiguous: bool = True) -> tuple[dict, list[dict]]:
+              scores: np.ndarray | None, contiguous: bool = True,
+              truth_rows: int | None = None, truth_coverage: dict | None = None,
+              alert_rows: int | None = None,
+              alert_coverage: dict | None = None) -> tuple[dict, list[dict]]:
     """Apply the FDES checks to one bucketed timeline.
 
     Returns the computed values and the list of things that were not computable, each with
     the reason it was not.
+
+    Evaluability is settled first. When the input cannot support a verdict, no check is
+    applied and every check reports that it could not be evaluated. A check that cannot be
+    evaluated must not report a pass, because three pass marks on a run that contains no
+    information is the exact failure this specification exists to criticise.
     """
     y = np.asarray(y).astype(int)
     pred = np.asarray(pred).astype(int)
@@ -458,6 +538,10 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     pm = point_metrics(y, pred)
     deg = degenerate_output(pred, scores)
 
+    blockers = evaluability_blockers(y, mode, truth_rows, truth_coverage,
+                                     alert_rows, alert_coverage)
+    evaluable = not blockers
+
     computed = {
         "n_buckets_evaluated": int(n),
         "n_anomalous_buckets": int(y.sum()),
@@ -466,6 +550,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         "f1_predict_all": round(floor, 4),
         "f1_minus_floor": round(pm["f1_score"] - floor, 4),
         "f1_over_floor": round(pm["f1_score"] / floor, 4) if floor > 0 else None,
+        "evaluable": evaluable,
+        "not_evaluable_reasons": blockers,
         "degenerate_output": deg,
     }
 
@@ -552,28 +638,27 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                    and pm["f1_score"] >= DEGENERATE_F1_RATIO * floor)
 
     reasons = []
-    if deg["alerts_on_everything"]:
-        reasons.append("The detector alerted on every bucket in the range")
-    if deg["alerts_on_nothing"]:
-        reasons.append("The detector alerted on no bucket in the range")
-    if deg["near_constant_score"]:
-        reasons.append("The score column is one near-constant value, so it cannot separate "
-                       "anything")
-    if sec8a:
-        reasons.append(f"FDES section 8a applies, because AUC-ROC {computed.get('auc_roc')} "
-                       f"is at or below the random reference {RANDOM_AUC_REFERENCE}")
-    if sec8b:
-        reasons.append(f"FDES section 8b applies, because F1 {pm['f1_score']} is within "
-                       f"{int(FLOOR_MARGIN * 100)} percent of the predict-all floor "
-                       f"{round(floor, 4)} while recall {pm['recall']} is at or above "
-                       f"{RECALL_SATURATION}, which is the flag-everything regime")
-    if no_lift and not sec8b:
-        reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
-                       f"{round(floor, 4)}, so flagging every bucket would have scored the "
-                       f"same or better")
-    if not both_classes:
-        reasons.append("The ground truth has only one class on this range, so no verdict "
-                       "can be reached")
+    if evaluable:
+        if deg["alerts_on_everything"]:
+            reasons.append("The detector alerted on every bucket in the range")
+        if deg["alerts_on_nothing"]:
+            reasons.append("The detector alerted on no bucket in the range")
+        if deg["near_constant_score"]:
+            reasons.append("The score column is one near-constant value, so it cannot "
+                           "separate anything")
+        if sec8a:
+            reasons.append(f"FDES section 8a applies, because AUC-ROC "
+                           f"{computed.get('auc_roc')} is at or below the random reference "
+                           f"{RANDOM_AUC_REFERENCE}")
+        if sec8b:
+            reasons.append(f"FDES section 8b applies, because F1 {pm['f1_score']} is within "
+                           f"{int(FLOOR_MARGIN * 100)} percent of the predict-all floor "
+                           f"{round(floor, 4)} while recall {pm['recall']} is at or above "
+                           f"{RECALL_SATURATION}, which is the flag-everything regime")
+        if no_lift and not sec8b:
+            reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
+                           f"{round(floor, 4)}, so flagging every bucket would have scored "
+                           f"the same or better")
 
     computed["checks"] = {
         "sec8a_auc_at_or_below_random": sec8a,
@@ -582,9 +667,31 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         "degenerate_table12_rule": table12,
         "degenerate_output": deg["degenerate"],
     }
+    # Three states per check, not two. A check that could not be evaluated says so, and it
+    # is never folded in with the ones that passed.
+    computed["check_status"] = {
+        "no_lift_over_predict_all": check_state(no_lift, evaluable),
+        "sec8a_auc_at_or_below_random": check_state(
+            sec8a, evaluable and computed.get("auc_roc") is not None),
+        "sec8b_flag_everything": check_state(sec8b, evaluable),
+        "degenerate_output": check_state(deg["degenerate"], evaluable),
+    }
     computed["exclusion_reasons"] = reasons
-    computed["verdict"] = "EXCLUDE" if reasons else "PASS"
+    if blockers:
+        computed["verdict"] = "INSUFFICIENT"
+    else:
+        computed["verdict"] = "EXCLUDE" if reasons else "PASS"
     return computed, not_computed
+
+
+NOT_EVALUABLE = "not evaluable"
+
+
+def check_state(fired: bool, can_evaluate: bool) -> str:
+    """One check, in one of three states. Passing is not the default."""
+    if not can_evaluate:
+        return NOT_EVALUABLE
+    return "EXCLUDE" if fired else "pass"
 
 
 # --------------------------------------------------------------------------- drivers
@@ -607,7 +714,9 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
     alerted, a_span = mark_windows(grid, a_start, a_end)
     truth, i_span = mark_windows(grid, i_start, i_end)
 
-    computed, not_computed = run_check(mode="alerts", y=truth, pred=alerted, scores=None)
+    computed, not_computed = run_check(mode="alerts", y=truth, pred=alerted, scores=None,
+                                      truth_rows=i_note["rows"], truth_coverage=i_span,
+                                      alert_rows=a_note["rows"], alert_coverage=a_span)
     return assemble("alerts", grid, computed, not_computed,
                     inputs={"alerts": a_note, "incidents": i_note},
                     coverage={"alerts": a_span, "incidents": i_span},
@@ -663,7 +772,8 @@ def check_scores(scores_csv: Path, incidents_csv: Path, bucket: str | None = Non
 
     pred = (s >= thr).astype(int)
     computed, not_computed = run_check(mode="scores", y=y, pred=pred, scores=s,
-                                       contiguous=bool(covered.all()))
+                                       contiguous=bool(covered.all()),
+                                       truth_rows=i_note["rows"], truth_coverage=i_span)
     computed["threshold"] = round(float(thr), 6)
     computed["threshold_source"] = thr_source
 
@@ -769,6 +879,28 @@ def _fmt(value, digits: int = 3) -> str:
     return str(value)
 
 
+def _plural(n: int, singular: str, plural: str | None = None) -> str:
+    return f"{n} {singular}" if n == 1 else f"{n} {plural or singular + 's'}"
+
+
+def merge_sentence(name: str, cov: dict) -> str:
+    """One sentence saying what the union of a set of windows did to the row count."""
+    one = cov["windows_inside_range"] == 1
+    inside = _plural(cov["windows_inside_range"], "window")
+    covered = _plural(cov["buckets_marked"], "bucket")
+    stretches = _plural(cov["distinct_stretches"], "distinct stretch", "distinct stretches")
+    absorbed = cov["buckets_absorbed_by_overlap"]
+    if not absorbed:
+        verb = "does not overlap. It covers" if one else "do not overlap. They cover"
+        return f"The {inside} of `{name}` inside the range {verb} {covered} in {stretches}."
+    return (f"The {inside} of `{name}` inside the range overlap. Merged, they cover "
+            f"{covered} in {stretches}. Unmerged they span "
+            f"{_plural(cov['bucket_span_before_merge'], 'bucket')}, so "
+            f"{_plural(absorbed, 'bucket')} "
+            f"({cov['overlap_fraction'] * 100:.1f} percent) of the window time sat under "
+            f"another window and {'was' if absorbed == 1 else 'were'} absorbed.")
+
+
 def render_report(r: dict) -> str:
     res = r["results"]
     grid = r["bucketing"]
@@ -778,11 +910,34 @@ def render_report(r: dict) -> str:
     floor = res["f1_predict_all"]
     scores_mode = r["mode"] == "scores"
 
+    status = res.get("check_status", {})
+    evaluable = res.get("evaluable", True)
+
     lines = [
         f"# {r['spec']} check report: your own data ({r['mode']} mode)",
         "",
         f"Verdict: **{r['verdict']}**",
         "",
+    ]
+
+    # The reason a run could not be evaluated is the whole story, so it sits with the
+    # verdict rather than under a heading further down.
+    if not evaluable:
+        lines += ["This run could not be evaluated. No check below was applied, and nothing "
+                  "here says anything about the detector.", ""]
+        for i, reason in enumerate(res["not_evaluable_reasons"], 1):
+            lines.append(f"{i}. {reason}")
+        lines.append("")
+
+    for name, cov in r["coverage"].items():
+        if cov.get("overlap_fraction", 0) >= OVERLAP_NOTICE:
+            lines += [
+                f"Overlap notice. {merge_sentence(name, cov)} Read the `{name}` row count as "
+                f"a count of windows. It is not a measure of how much time they cover.",
+                "",
+            ]
+
+    lines += [
         f"Timeline {grid['from_iso']} to {grid['to_iso']}, "
         f"{grid['n_buckets']} buckets of {grid['bucket_seconds']} s. "
         f"{res['n_buckets_evaluated']} buckets were evaluated, of which "
@@ -794,17 +949,18 @@ def render_report(r: dict) -> str:
         f"({res['n_anomalous_buckets']} of {res['n_buckets_evaluated']} buckets) | | reported |",
         f"| Predict-all F1 floor | 2, 7 | F1 = {_fmt(res['f1_score'])} | "
         f"floor = {_fmt(floor)} (p = {_fmt(p, 4)}) | "
-        f"F1 minus floor = {res['f1_minus_floor']:+.3f} |",
+        + (f"F1 minus floor = {res['f1_minus_floor']:+.3f} |" if evaluable
+           else f"{NOT_EVALUABLE} |"),
         f"| Lift over predict-all | 7 (this tool's rule) | F1 / floor = "
         f"{_fmt(res['f1_over_floor'], 2)} | > 1.0 | "
-        f"{'EXCLUDE' if checks['no_lift_over_predict_all'] else 'pass'} |",
+        f"{status.get('no_lift_over_predict_all', 'pass')} |",
     ]
 
     if scores_mode and res.get("auc_roc") is not None:
         lines += [
             f"| Threshold-independent (ROC) | 6, 8a | AUC-ROC = {_fmt(res['auc_roc'])} | "
             f"{RANDOM_AUC_REFERENCE} | "
-            f"{'EXCLUDE' if checks['sec8a_auc_at_or_below_random'] else 'pass'} |",
+            f"{status.get('sec8a_auc_at_or_below_random', 'pass')} |",
             f"| Threshold-independent (PR) | 6, 7 | PR-AUC = {_fmt(res['pr_auc'])} | "
             f"p = {_fmt(p, 4)} | normalised lift = {res['pr_lift_normalized']} |",
         ]
@@ -826,11 +982,11 @@ def render_report(r: dict) -> str:
         f"| Flag-everything guard | 8b | recall = {_fmt(res['recall'])}, alerted rate = "
         f"{_fmt(deg['alerted_rate'])} | F1 within {int(FLOOR_MARGIN * 100)}% of floor and "
         f"recall >= {RECALL_SATURATION} | "
-        f"{'EXCLUDE' if checks['sec8b_flag_everything'] else 'pass'} |",
+        f"{status.get('sec8b_flag_everything', 'pass')} |",
         f"| Degenerate output guard | 8 | alerted rate = {_fmt(deg['alerted_rate'])}, "
         f"distinct scores = {deg['distinct_scores'] if deg['distinct_scores'] is not None else 'n/a'} | "
         f"alerts on all, alerts on none, or one near-constant score | "
-        f"{'EXCLUDE' if deg['degenerate'] else 'pass'} |",
+        f"{status.get('degenerate_output', 'pass')} |",
     ]
     if scores_mode and res.get("auc_roc") is not None:
         lines.append(
@@ -849,6 +1005,10 @@ def render_report(r: dict) -> str:
     ]
     if scores_mode:
         lines.append(f"Threshold {res['threshold']}, {res['threshold_source']}.")
+    if not evaluable:
+        lines.append("These are arithmetic on a timeline with no usable ground truth. They "
+                     "are printed so the counts can be checked against the input, not as a "
+                     "measurement of anything.")
 
     lines += ["", "## What this run could not compute", ""]
     if r["not_computed"]:
@@ -875,6 +1035,9 @@ def render_report(r: dict) -> str:
             counts = ", ".join(f"{k} {v}" for k, v in sorted(note["severity_counts"].items()))
             line += f", severities {counts}"
         lines.append(line + ".")
+        cov = r["coverage"].get(name, {})
+        if cov.get("windows_inside_range"):
+            lines.append(merge_sentence(name, cov))
     for name, cov in r["coverage"].items():
         outside = cov.get("windows_fully_outside_range", 0)
         partial = cov.get("windows_partly_outside_range", 0)

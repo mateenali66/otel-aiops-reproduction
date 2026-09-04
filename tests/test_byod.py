@@ -35,6 +35,20 @@ INCIDENTS = ("start,end\n"
              "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
 N_ANOMALOUS = 90
 
+# The same two incidents moved two months later, so nothing lands inside the day above.
+# This is the shape real data takes when the incident export and the observation window
+# come from different systems.
+INCIDENTS_OUTSIDE = ("start,end\n"
+                     "2026-05-01T02:00:00Z,2026-05-01T03:00:00Z\n"
+                     "2026-05-02T14:00:00Z,2026-05-02T14:30:00Z\n")
+
+# Three alert windows inside the day. The first two overlap between 02:30 and 03:00.
+# Before merging they span 60 + 90 + 30 = 180 buckets. The union covers 150 in two
+# stretches, so 30 buckets, one sixth of the alert time, is absorbed.
+OVERLAPPING_ALERTS = ("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                      "2026-03-01T02:30:00Z,2026-03-01T04:00:00Z\n"
+                      "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+
 
 def write(tmp: Path, name: str, text: str) -> Path:
     path = tmp / name
@@ -51,11 +65,11 @@ class TempCase(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def alerts(self, text: str, **kwargs):
+    def alerts(self, text: str, incidents: Path | None = None, **kwargs):
         path = write(self.tmp, "alerts.csv", "start,end\n" + text)
         opts = dict(t_from=DAY_FROM, t_to=DAY_TO)
         opts.update(kwargs)
-        return byod.check_alerts(path, self.incidents, BUCKET, **opts)
+        return byod.check_alerts(path, incidents or self.incidents, BUCKET, **opts)
 
     def scores(self, rows: list[tuple[int, float]], **kwargs):
         text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
@@ -162,11 +176,153 @@ class TestAlertNothing(TempCase):
         self.assertIn("The detector alerted on no bucket in the range",
                       res["exclusion_reasons"])
 
-    def test_alerts_entirely_outside_the_range_count_as_no_alerts(self):
+    def test_alerts_entirely_outside_the_range_are_a_range_mismatch_not_a_verdict(self):
+        # Rows that all miss the range say the range is wrong. That is an input problem,
+        # so it must not be reported as a detector that never fired.
         r = self.alerts("2026-04-01T00:00:00Z,2026-04-01T01:00:00Z\n")
-        self.assertEqual(r["verdict"], "EXCLUDE")
-        self.assertTrue(r["results"]["degenerate_output"]["alerts_on_nothing"])
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
         self.assertEqual(r["coverage"]["alerts"]["windows_fully_outside_range"], 1)
+        reasons = " ".join(r["results"]["not_evaluable_reasons"])
+        self.assertIn("alert windows fall entirely outside", reasons)
+        self.assertIn("not at a silent detector", reasons)
+
+
+class TestNullRun(TempCase):
+    """A run whose input cannot support a verdict must not report any pass.
+
+    This is the failure the whole procedure exists to criticise, so it gets the most
+    tests. Prevalence zero makes the predict-all floor zero, which used to make F1 minus
+    floor read +0.000 and three guards read pass on a run holding no information.
+    """
+
+    def outside(self):
+        return write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
+
+    def null_run(self):
+        return self.alerts(OVERLAPPING_ALERTS, incidents=self.outside())
+
+    def test_a_run_with_prevalence_zero_reports_no_passes(self):
+        r = self.null_run()
+        res = r["results"]
+        self.assertEqual(res["prevalence"], 0.0)
+        self.assertFalse(res["evaluable"])
+        self.assertEqual([], [k for k, v in res["check_status"].items() if v == "pass"])
+        for state in res["check_status"].values():
+            self.assertEqual(state, "not evaluable")
+        # And nothing in the rendered table says pass either.
+        self.assertNotIn("| pass |", byod.render_report(r))
+
+    def test_a_run_with_prevalence_zero_is_neither_pass_nor_exclude(self):
+        r = self.null_run()
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertEqual(r["results"]["exclusion_reasons"], [])
+
+    def test_a_null_run_never_prints_a_lift_over_the_floor(self):
+        report = byod.render_report(self.null_run())
+        self.assertNotIn("F1 minus floor", report)
+        self.assertNotIn("+0.000", report)
+
+    def test_the_reason_sits_at_the_top_with_the_verdict(self):
+        report = byod.render_report(self.null_run())
+        reason = report.index("incident windows fall entirely outside")
+        self.assertLess(reason, report.index("| Check | Section |"))
+        self.assertLess(reason, report.index("Timeline 2026-03-01"))
+        self.assertIn("This run could not be evaluated", report)
+
+    def test_incidents_all_outside_the_range_name_the_count(self):
+        r = self.null_run()
+        reasons = " ".join(r["results"]["not_evaluable_reasons"])
+        self.assertIn("All 2 incident windows fall entirely outside", reasons)
+        self.assertIn("--from", reasons)
+
+    def test_an_incident_csv_with_no_rows_is_not_evaluable(self):
+        empty = write(self.tmp, "empty_incidents.csv", "start,end\n")
+        r = self.alerts(OVERLAPPING_ALERTS, incidents=empty)
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertIn("no rows", " ".join(r["results"]["not_evaluable_reasons"]))
+
+    def test_a_range_where_every_bucket_is_anomalous_is_not_evaluable(self):
+        whole_day = write(self.tmp, "all_day.csv", f"start,end\n{DAY_FROM},{DAY_TO}\n")
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n", incidents=whole_day)
+        res = r["results"]
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertEqual(res["prevalence"], 1.0)
+        self.assertIn("one class only", " ".join(res["not_evaluable_reasons"]))
+        self.assertNotIn("| pass |", byod.render_report(r))
+
+    def test_a_null_run_in_scores_mode_is_also_not_evaluable(self):
+        outside = self.outside()
+        t0 = byod.parse_bound(DAY_FROM, "from")
+        rows = [(t0 + i * 60, round(0.1 + 0.4 * ((i % 11) / 10.0), 6)) for i in range(N_BUCKETS)]
+        text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
+        path = write(self.tmp, "scores.csv", text)
+        r = byod.check_scores(path, outside, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertNotIn("| pass |", byod.render_report(r))
+
+    def test_an_empty_alert_csv_is_still_a_real_result(self):
+        # A detector that never fired is measurable against a usable ground truth, so it
+        # keeps its EXCLUDE. Only rows that all miss the range are a range mismatch.
+        r = self.alerts("")
+        self.assertEqual(r["verdict"], "EXCLUDE")
+        self.assertTrue(r["results"]["evaluable"])
+
+
+class TestOverlappingWindows(TempCase):
+    """Overlapping alert windows are unioned, and the report says how much that absorbed."""
+
+    def test_overlap_is_counted_rather_than_vanishing(self):
+        r = self.alerts(OVERLAPPING_ALERTS)
+        cov = r["coverage"]["alerts"]
+        self.assertEqual(cov["windows_inside_range"], 3)
+        self.assertEqual(cov["bucket_span_before_merge"], 180)
+        self.assertEqual(cov["buckets_marked"], 150)
+        self.assertEqual(cov["buckets_absorbed_by_overlap"], 30)
+        self.assertEqual(cov["distinct_stretches"], 2)
+        self.assertAlmostEqual(cov["overlap_fraction"], 30 / 180, places=4)
+
+    def test_windows_that_do_not_overlap_absorb_nothing(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        cov = r["coverage"]["alerts"]
+        self.assertEqual(cov["buckets_absorbed_by_overlap"], 0)
+        self.assertEqual(cov["overlap_fraction"], 0.0)
+        self.assertEqual(cov["distinct_stretches"], 2)
+        self.assertEqual(cov["bucket_span_before_merge"], cov["buckets_marked"])
+
+    def test_the_report_states_rows_stretches_and_absorbed_time(self):
+        report = byod.render_report(self.alerts(OVERLAPPING_ALERTS))
+        self.assertIn("Input `alerts`: 3 rows", report)
+        self.assertIn("150 buckets in 2 distinct stretches", report)
+        self.assertIn("Unmerged they span 180 buckets", report)
+        self.assertIn("30 buckets (16.7 percent) of the window time", report)
+        self.assertIn("were absorbed", report)
+
+    def test_a_large_overlap_is_named_near_the_top(self):
+        report = byod.render_report(self.alerts(OVERLAPPING_ALERTS))
+        notice = report.index("Overlap notice")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertIn("16.7 percent", report[notice:notice + 600])
+
+    def test_a_small_overlap_gets_no_notice_at_the_top(self):
+        # One bucket of overlap out of 90 is under the threshold that earns a notice.
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T02:59:00Z,2026-03-01T03:30:00Z\n")
+        cov = r["coverage"]["alerts"]
+        self.assertEqual(cov["buckets_absorbed_by_overlap"], 1)
+        self.assertLess(cov["overlap_fraction"], byod.OVERLAP_NOTICE)
+        report = byod.render_report(r)
+        self.assertNotIn("Overlap notice", report)
+        self.assertIn("1 bucket (1.1 percent) of the window time", report)
+        self.assertIn("was absorbed", report)
+
+    def test_stretch_counting(self):
+        import numpy as np
+        self.assertEqual(byod.count_stretches(np.array([], dtype=bool)), 0)
+        self.assertEqual(byod.count_stretches(np.zeros(5, dtype=bool)), 0)
+        self.assertEqual(byod.count_stretches(np.ones(5, dtype=bool)), 1)
+        self.assertEqual(byod.count_stretches(
+            np.array([1, 1, 0, 1, 0, 0, 1], dtype=bool)), 3)
 
 
 class TestConstantScore(TempCase):
@@ -420,6 +576,22 @@ class TestCli(unittest.TestCase):
                                "--to", "2026-03-08T00:00:00Z", "--out", tmp)
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
             self.assertIn("Verdict: **EXCLUDE**", p.stdout)
+
+    def test_a_run_that_cannot_be_evaluated_exits_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(
+                "start,end\n2026-09-01T02:00:00Z,2026-09-01T03:00:00Z\n")
+            (d / "alerts.csv").write_text(
+                "start,end\n2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n")
+            p = self.run_check("--alerts", str(d / "alerts.csv"),
+                               "--incidents", str(d / "incidents.csv"),
+                               "--bucket", "5m", "--from", "2026-03-01T00:00:00Z",
+                               "--to", "2026-03-08T00:00:00Z", "--out", str(d / "out"))
+            self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+            self.assertIn("Verdict: **INSUFFICIENT**", p.stdout)
+            self.assertIn("This run could not be evaluated", p.stdout)
+            self.assertNotIn("| pass |", p.stdout)
 
     def test_check_needs_no_zenodo_artifact(self):
         p = self.run_check("--alerts", "examples/alerts_good.csv",

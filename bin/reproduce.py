@@ -11,7 +11,8 @@ Subcommands
   estimate        print the runtime estimate without running anything
   pilot           evaluate your own detector under the FDES v1.0.0-draft procedure
   check           run the FDES checks against your own alert or score CSVs; no Zenodo
-                  artifact and no detector plugin needed
+                  artifact and no detector plugin needed. Exit 0 PASS, 2 EXCLUDE,
+                  3 INSUFFICIENT (the input could not support a verdict)
 
 Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
 sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
@@ -481,6 +482,12 @@ def cmd_pilot(args) -> None:
 
 # --------------------------------------------------------------------------- check
 
+# PASS, EXCLUDE and INSUFFICIENT are three different answers, so they get three exit codes.
+# EXCLUDE means the detector is not worth deploying. INSUFFICIENT means the input could not
+# support a verdict either way, which is a problem with the CSVs and not with the detector.
+CHECK_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3}
+
+
 def cmd_check(args) -> None:
     """Run the FDES checks against the user's own CSVs. No Zenodo artifact is needed."""
     from fdes import byod
@@ -509,7 +516,7 @@ def cmd_check(args) -> None:
     out = byod.write_outputs(result, Path(args.out) / label)
     log((out / "check_report.md").read_text())
     log(f"written: {out}/check_result.json, check_report.md")
-    sys.exit(0 if result["verdict"] == "PASS" else 2)
+    sys.exit(CHECK_EXIT_CODES[result["verdict"]])
 
 
 # --------------------------------------------------------------------------- main

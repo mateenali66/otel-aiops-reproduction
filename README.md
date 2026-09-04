@@ -13,7 +13,7 @@ expected output.
 It is the reference implementation of the Failure Detection Evaluation Specification (FDES)
 v1.0.0-draft ([github.com/mateenali66/failure-detection-evaluation-spec](https://github.com/mateenali66/failure-detection-evaluation-spec)).
 It ships a plugin interface, so an operator can put their own detector through the same
-procedure and get a pass or exclude verdict against the specification.
+procedure and get a verdict against the specification.
 
 If what you actually want is to point the checks at your own monitoring data, skip to
 [Check your own data](#check-your-own-data). That path needs two CSVs and no download.
@@ -344,8 +344,52 @@ make check SCORES=my_scores.csv INCIDENTS=my_incidents.csv BUCKET=5m \
   FROM=2026-03-01T00:00:00Z TO=2026-03-08T00:00:00Z THRESHOLD=0.82
 ```
 
-Exit code 0 means PASS and 2 means EXCLUDE, the same as `make pilot`. The run writes
+Exit code 0 means PASS, 2 means EXCLUDE and 3 means INSUFFICIENT. The run writes
 `out/check/<name>/check_result.json` and `check_report.md`.
+
+### The three verdicts
+
+`EXCLUDE` and `INSUFFICIENT` are opposite messages. One says fix your detector. The other
+says fix your input.
+
+| Verdict | Exit code | What it means | What to do |
+|---|---|---|---|
+| `PASS` | 0 | the detector cleared every check that could be evaluated | read the report for which checks those were |
+| `EXCLUDE` | 2 | the input supported a verdict and the detector failed a check | the detector is not worth deploying as it stands |
+| `INSUFFICIENT` | 3 | the input could not support a verdict either way | fix the CSVs or the range, then run it again |
+
+A run is `INSUFFICIENT` when any of these hold.
+
+- Prevalence is zero. No bucket in the range falls inside an incident window.
+- Every incident window falls entirely outside the range.
+- The incident CSV has no rows.
+- Every bucket falls inside an incident window, so the ground truth has one class.
+- Every alert window falls entirely outside the range. Rows that all miss the range point
+  at a wrong `--from` and `--to`. An alert CSV with no rows at all is different. That is a
+  detector that never fired, it is a real result, and it gets a real verdict.
+
+On an `INSUFFICIENT` run no check is applied and every check reports `not evaluable`. None
+of them report `pass`. This matters more than it looks. At prevalence zero the predict-all
+floor is also zero, so an F1 of zero sits exactly on the floor. The lift guard, the
+flag-everything guard and the degenerate-output guard would all have read `pass`, and the
+floor row would have read `F1 minus floor = +0.000`. Three pass marks and a plus sign on a
+run holding no information is the exact failure this specification exists to criticise. The
+reason the run could not be evaluated is printed at the top, next to the verdict.
+
+### Overlapping alert windows
+
+Windows are unioned into one alerted mask, because the question each bucket answers is
+"was this bucket alerted", and two concurrent alerts on the same bucket are still one
+alerted bucket. Concurrent alerts are normal on real data. Latency stories on different
+services overlap constantly, so a row count can overstate the alert time badly. On one
+Datadog Watchdog export, 156 stories merged into 95 distinct stretches and about a quarter
+of the alert time sat under another story.
+
+The union is kept and the cost of it is reported. Every run states the input row count, the
+number of distinct stretches after merging, and how many buckets were absorbed. When the
+absorbed share reaches 10 percent the report says so at the top as well, so the row count is
+not read as a measure of covered time. The same counts are in `check_result.json` under
+`coverage`.
 
 ### The CSV format
 
@@ -496,8 +540,9 @@ sweep. [...]
    your events are shorter than a second.
 ```
 
-The full report also lists the input files, their row counts and their severity
-distribution. `check_result.json` next to it carries every number, the bucketing, and the
+The full report also lists the input files, their row counts, their severity distribution
+and what merging overlapping windows absorbed. `check_result.json` next to it carries every
+number, the bucketing, the per-check `check_status`, the window coverage counts, and the
 machine-readable `not_computed` list.
 
 ## Layout
