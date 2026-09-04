@@ -295,6 +295,393 @@ class TestFlagEverything(TempCase):
                            incidents=incidents)
 
 
+class TestAlertRateSecondPath(TempCase):
+    """The guard used to be one gate with a redundant condition, so it had one real bar.
+
+    Because 4 x 0.125 = 0.5, the multiple in path A is implied by the rate whenever
+    prevalence is under 0.125, and real incident data almost never sits above that. So the
+    guard was really just "alerts more than half the time" and the ratio never bound. On the
+    second real run a detector alerting on 40 percent of a fourteen day timeline where 3.97
+    percent of it was anomalous passed at exit 0 with the best F1 in the table. 0.499 passed
+    and 0.500 excluded, with a step function in between and nothing else looking.
+    """
+
+    # 57 anomalous buckets of 1440, so prevalence is 0.0396, which is the real figure.
+    INCIDENT = "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:57:00Z\n"
+
+    def at_rate(self, alerted_buckets: int, **kwargs):
+        """The incident caught whole, plus enough clean-time alerting to hit a rate."""
+        incidents = write(self.tmp, "fifty_seven.csv", self.INCIDENT)
+        extra = alerted_buckets - 57
+        end_h, end_m = divmod(6 * 60 + extra, 60)
+        return self.alerts(f"2026-03-01T02:00:00Z,2026-03-01T02:57:00Z\n"
+                           f"2026-03-01T06:00:00Z,2026-03-01T{end_h:02d}:{end_m:02d}:00Z\n",
+                           incidents=incidents, sweep=False, **kwargs)
+
+    def test_forty_percent_at_four_percent_prevalence_now_excludes(self):
+        res = self.at_rate(576)["results"]
+        self.assertAlmostEqual(res["prevalence"], 0.0396, places=4)
+        self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.400, places=4)
+        self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 10.1, places=1)
+        self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(res["alert_rate_path"], "B")
+
+    def test_the_old_shape_would_have_passed_it(self):
+        res = self.at_rate(576)["results"]
+        # Nothing else in the procedure touches this run. Path A cannot see it, and every
+        # other check reports pass, so before the second path it was a PASS at exit 0.
+        self.assertLess(res["degenerate_output"]["alerted_rate"],
+                        byod.ALERT_RATE_SATURATION)
+        self.assertGreater(res["f1_over_floor"], 2.0)
+        self.assertFalse(res["checks"]["no_lift_over_predict_all"])
+        self.assertFalse(res["checks"]["sec8b_flag_everything"])
+        self.assertFalse(res["checks"]["degenerate_output"])
+        self.assertEqual(len(res["exclusion_reasons"]), 1)
+
+    def test_the_reason_names_the_lower_floor_rather_than_the_majority_of_the_time(self):
+        reasons = " ".join(self.at_rate(576)["results"]["exclusion_reasons"])
+        self.assertIn("10 times as often as anything was wrong", reasons)
+        self.assertIn("on 40.0 percent of the wall-clock time", reasons)
+        self.assertIn("over the 20 percent", reasons)
+        self.assertNotIn("majority of the wall-clock time", reasons)
+
+    def test_the_step_at_the_old_floor_is_gone(self):
+        # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
+        for buckets in (719, 720):
+            res = self.at_rate(buckets)["results"]
+            self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"], buckets)
+
+    def test_a_rare_incident_detector_that_alerts_rarely_keeps_its_pass(self):
+        # The case the absolute floor exists to protect. Prevalence 0.0014, alerted rate
+        # 0.0139, so exactly ten times prevalence and a twentieth of the lower floor.
+        incidents = write(self.tmp, "two_minutes.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:02:00Z\n")
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T02:02:00Z\n"
+                        "2026-03-01T06:00:00Z,2026-03-01T06:18:00Z\n",
+                        incidents=incidents, sweep=False)
+        res = r["results"]
+        self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.0139, places=4)
+        self.assertAlmostEqual(res["alerted_rate_over_prevalence"],
+                               byod.ALERT_RATE_RATIO_MULTIPLE, places=2)
+        self.assertLess(res["degenerate_output"]["alerted_rate"],
+                        byod.ALERT_RATE_RATIO_FLOOR)
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_a_perfect_detector_on_busy_data_still_passes(self):
+        # Prevalence 0.6, alerted rate 0.6, so path A's multiple stops it and path B's
+        # ratio stops it. Neither path reaches a detector that is exactly right.
+        busy = write(self.tmp, "busy_incidents.csv",
+                     "start,end\n2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n")
+        r = self.alerts("2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n", incidents=busy,
+                        sweep=False)
+        res = r["results"]
+        self.assertAlmostEqual(res["prevalence"], 0.6, places=4)
+        self.assertEqual(res["f1_score"], 1.0)
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_the_check_table_names_both_paths(self):
+        report = byod.render_report(self.at_rate(576))
+        self.assertIn(f"rate >= {byod.ALERT_RATE_SATURATION} and >= "
+                      f"{int(byod.ALERT_RATE_MULTIPLE)} x p, or rate >= "
+                      f"{byod.ALERT_RATE_RATIO_FLOOR} and >= "
+                      f"{int(byod.ALERT_RATE_RATIO_MULTIPLE)} x p", report)
+
+    def test_path_a_still_names_itself(self):
+        res = TestFlagEverything.real_flag_everything(self)["results"]
+        self.assertEqual(res["alert_rate_path"], "A")
+        self.assertIn("majority of the wall-clock time",
+                      " ".join(res["exclusion_reasons"]))
+
+    def test_the_command_line_exits_two_on_the_second_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(self.INCIDENT)
+            (d / "alerts.csv").write_text(
+                "start,end\n"
+                "2026-03-01T02:00:00Z,2026-03-01T02:57:00Z\n"
+                "2026-03-01T06:00:00Z,2026-03-01T14:39:00Z\n")
+            p = subprocess.run(
+                [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check",
+                 "--alerts", str(d / "alerts.csv"), "--incidents", str(d / "incidents.csv"),
+                 "--bucket", "60s", "--from", DAY_FROM, "--to", DAY_TO,
+                 "--no-sweep", "--out", str(d / "out")],
+                cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("Verdict: **EXCLUDE**", p.stdout)
+            self.assertIn("10 times as often as anything was wrong", p.stdout)
+
+
+class TestNoMinimumRecall(TempCase):
+    """A PASS can be carried by precision alone, and that is deliberate but not silent.
+
+    One real run gave four instantaneous alerts over four days. Recall 0.071, F1 0.130,
+    lift 1.85, PASS at exit 0. The detector missed 93 percent of the incident time. There is
+    no recall floor in the procedure, because a high-precision detector that fires rarely is
+    a real thing worth keeping and because bucket-level recall is pushed down by the export
+    format as much as by the detector. So it is reported and not excluded.
+    """
+
+    def thin_recall(self, **kwargs):
+        """Recall 0.067, precision 0.667, F1 0.121 against a floor of 0.041, so lift 2.97.
+
+        Close to the real numbers, and the same shape. Point events, two of the three
+        landing inside the one 30 minute incident, so 28 of its 30 buckets are missed.
+        """
+        incidents = write(self.tmp, "half_hour.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n")
+        path = write(self.tmp, "instants.csv",
+                     "start\n"
+                     "2026-03-01T02:10:00Z\n"
+                     "2026-03-01T02:20:00Z\n"
+                     "2026-03-01T20:00:00Z\n")
+        opts = dict(t_from=DAY_FROM, t_to=DAY_TO, sweep=False)
+        opts.update(kwargs)
+        return byod.check_alerts(path, incidents, BUCKET, **opts)
+
+    def test_a_pass_on_thin_recall_is_still_a_pass(self):
+        r = self.thin_recall()
+        res = r["results"]
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertLess(res["recall"], byod.LOW_RECALL_NOTICE)
+        self.assertGreater(res["f1_over_floor"], 1.0)
+        self.assertEqual(res["exclusion_reasons"], [])
+        self.assertTrue(res["low_recall"])
+        self.assertEqual(res["low_recall_band"], byod.LOW_RECALL_NOTICE)
+
+    def test_the_notice_sits_with_the_verdict_and_says_what_carried_it(self):
+        report = byod.render_report(self.thin_recall())
+        notice = report.index("Thin recall behind this verdict.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:notice + 1200]
+        self.assertIn("percent of the incident time and missed", body)
+        self.assertIn("There is no minimum recall in this procedure, on purpose", body)
+        self.assertIn("instantaneous alerts cannot reach high bucket recall", body)
+        self.assertIn("said rather than acted on", body)
+
+    def test_a_detector_with_real_coverage_gets_no_notice(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        self.assertEqual(r["results"]["recall"], 1.0)
+        self.assertFalse(r["results"]["low_recall"])
+        self.assertNotIn("Thin recall", byod.render_report(r))
+
+    def test_an_excluded_run_gets_no_notice(self):
+        # The notice is about a PASS that reads better than it is. On an EXCLUDE the
+        # exclusion reasons already say what went wrong.
+        r = self.alerts("2026-03-01T05:00:00Z,2026-03-01T11:00:00Z\n")
+        self.assertEqual(r["verdict"], "EXCLUDE")
+        self.assertLess(r["results"]["recall"], byod.LOW_RECALL_NOTICE)
+        self.assertFalse(r["results"]["low_recall"])
+        self.assertNotIn("Thin recall", byod.render_report(r))
+
+    def test_a_run_that_cannot_be_evaluated_gets_no_notice(self):
+        outside = write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
+        r = self.alerts(OVERLAPPING_ALERTS, incidents=outside)
+        self.assertFalse(r["results"]["low_recall"])
+        self.assertNotIn("Thin recall", byod.render_report(r))
+
+
+class TestProvenance(TempCase):
+    """The tool cannot tell whether the incident windows came from the alerts it is scoring.
+
+    Deriving incident windows by clustering the detector's own alerts gives near-perfect
+    recall and a high lift, because every incident was defined by an alert. Nothing in the
+    numbers shows it, so the assumption list says it every run.
+    """
+
+    def test_every_run_says_provenance_was_not_checked(self):
+        for r in (self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"),
+                  self.scores(self.score_rows(0.9, 0.1, jitter=0.05))):
+            joined = " ".join(r["assumptions"])
+            self.assertIn("Provenance was not checked", joined)
+            self.assertIn("derived from the alerts being scored", joined)
+            self.assertIn("the result is circular", joined)
+            self.assertIn("Where the incident windows came from", joined)
+
+    def test_the_readme_carries_the_long_form(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("### Where the incident windows came from", readme)
+        self.assertIn("Ground truth has to come from somewhere the detector cannot reach",
+                      readme)
+        # It sits where the reader is about to build their files, not after the fact.
+        self.assertLess(readme.index("### Where the incident windows came from"),
+                        readme.index("### Getting alert data out of a real vendor"))
+        self.assertGreater(readme.index("### Where the incident windows came from"),
+                           readme.index("### On your own data"))
+
+
+class TestAlertedRateRatio(TempCase):
+    """The guard needs two conditions and only one of them ever fired on real data.
+
+    Across two independent datasets, twelve bucket sizes and two ground-truth variants the
+    ratio condition fired every time and the guard never fired once, because the alerted
+    rate topped out at 0.396 and 0.486 against the 0.5 floor. Measured ratios in the second
+    run ran from 11.7 to 14.7. A detector alerting up to fifteen times more often than
+    anything was wrong passed the ratio test several times over and the report said nothing.
+
+    The floor does not move. Two datasets is not enough for that, and the floor is what
+    keeps a rare-incident detector from being condemned for working. The ratio is reported
+    instead, at the guard's own multiple, and the reader judges it.
+    """
+
+    def high_ratio(self, **kwargs):
+        """Alerted rate 0.150 at prevalence 0.0208, so the ratio is 7.2.
+
+        One 30 minute incident, caught whole, plus 186 minutes of clean-time alerting.
+        216 of the 1440 buckets are alerted and 30 of them are anomalous. That sits in the
+        band between the two paths of the guard, so nothing excludes it and the ratio is
+        the only thing with anything to say.
+        """
+        incidents = write(self.tmp, "one_short_incident.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n")
+        return self.alerts("2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n"
+                           "2026-03-01T06:00:00Z,2026-03-01T09:06:00Z\n",
+                           incidents=incidents, **kwargs)
+
+    def test_the_ratio_is_measured_and_flagged_while_the_guard_stays_quiet(self):
+        res = self.high_ratio()["results"]
+        self.assertAlmostEqual(res["prevalence"], 30 / 1440, places=6)
+        self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.15, places=4)
+        self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 7.2, places=1)
+        self.assertTrue(res["alerted_rate_ratio_high"])
+        # The guard did not fire, and the verdict is what it was before this notice existed.
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(res["check_status"]["alert_rate_far_above_prevalence"], "pass")
+        self.assertEqual(res["exclusion_reasons"], [])
+
+    def test_the_verdict_is_unchanged_by_the_notice(self):
+        self.assertEqual(self.high_ratio()["verdict"], "PASS")
+        self.assertEqual(self.high_ratio(sweep=False)["verdict"], "PASS")
+
+    def test_the_notice_sits_with_the_verdict_and_says_how_many_times(self):
+        report = byod.render_report(self.high_ratio())
+        notice = report.index("Alerted far more often than anything was wrong.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:report.index("| Check | Section |")]
+        self.assertIn("7.2 times as often as anything was wrong", body)
+        self.assertIn("15.0 percent", body)
+        self.assertIn("2.1 percent", body)
+
+    def test_the_notice_says_why_neither_path_of_the_guard_reached_it(self):
+        body = byod.render_report(self.high_ratio())
+        self.assertIn("Neither path of the flag-everything guard reaches it", body)
+        self.assertIn(f"{byod.ALERT_RATE_SATURATION} on one path", body)
+        self.assertIn(f"{byod.ALERT_RATE_RATIO_FLOOR} on the other", body)
+        self.assertIn("not condemned for working", body)
+        self.assertIn("reported rather than acted on", body)
+
+    def test_a_run_in_the_band_between_the_two_paths_names_both_of_them(self):
+        # Alerted rate 0.292 at prevalence 0.0625, so the ratio is 4.67. Over the lower
+        # floor of 0.20 and under the ratio of 10 that floor asks for.
+        r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n", sweep=False)
+        res = r["results"]
+        self.assertGreater(res["degenerate_output"]["alerted_rate"],
+                           byod.ALERT_RATE_RATIO_FLOOR)
+        self.assertLess(res["alerted_rate_over_prevalence"],
+                        byod.ALERT_RATE_RATIO_MULTIPLE)
+        self.assertTrue(res["alerted_rate_ratio_high"])
+        body = byod.render_report(r)
+        self.assertIn("sits in the band between them", body)
+
+    def test_the_ratio_also_lands_in_the_check_table(self):
+        report = byod.render_report(self.high_ratio())
+        self.assertIn("| Alerted rate against prevalence | 8b | alerted rate = 0.150, "
+                      "p = 0.0208, ratio = 7.2x |", report)
+
+    def test_the_reporting_threshold_is_the_guards_own_multiple(self):
+        self.assertEqual(byod.RATIO_NOTICE_MULTIPLE, byod.ALERT_RATE_MULTIPLE)
+        res = self.high_ratio()["results"]
+        self.assertEqual(res["alerted_rate_ratio_notice_multiple"],
+                         byod.RATIO_NOTICE_MULTIPLE)
+
+    def test_an_ordinary_ratio_gets_no_notice(self):
+        # A detector alerting about as often as things go wrong. Nothing to say.
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        res = r["results"]
+        self.assertLess(res["alerted_rate_over_prevalence"], byod.RATIO_NOTICE_MULTIPLE)
+        self.assertFalse(res["alerted_rate_ratio_high"])
+        self.assertNotIn("Alerted far more often", byod.render_report(r))
+
+    def test_a_perfect_detector_has_a_ratio_of_one(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        res = r["results"]
+        self.assertEqual(res["alerted_rate_over_prevalence"], 1.0)
+        self.assertFalse(res["alerted_rate_ratio_high"])
+
+    def test_a_run_the_guard_did_exclude_gets_no_second_notice(self):
+        # The exclusion reason already names the rate, the prevalence and the multiple.
+        # Saying it twice, once as an exclusion and once as a notice, would read as two
+        # findings rather than one.
+        r = TestFlagEverything.real_flag_everything(self)
+        res = r["results"]
+        self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertGreater(res["alerted_rate_over_prevalence"], byod.RATIO_NOTICE_MULTIPLE)
+        self.assertFalse(res["alerted_rate_ratio_high"])
+        self.assertNotIn("Alerted far more often", byod.render_report(r))
+        self.assertIn("22 times as often", " ".join(res["exclusion_reasons"]))
+
+    def test_a_run_that_cannot_be_evaluated_gets_no_notice(self):
+        outside = write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
+        r = self.alerts(OVERLAPPING_ALERTS, incidents=outside)
+        res = r["results"]
+        self.assertIsNone(res["alerted_rate_over_prevalence"])
+        self.assertFalse(res["alerted_rate_ratio_high"])
+        self.assertNotIn("Alerted far more often", byod.render_report(r))
+
+    def test_the_notice_applies_in_scores_mode_too(self):
+        # The score ranks well, so section 8a is quiet, and the operating point still
+        # alerts fourteen times more often than anything is wrong.
+        incidents = write(self.tmp, "one_short_incident.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n")
+        t0 = byod.parse_bound(DAY_FROM, "from")
+        rows = []
+        for i in range(N_BUCKETS):
+            if 120 <= i < 150:
+                value = 0.9
+            elif 360 <= i < 546:
+                value = 0.7
+            else:
+                value = 0.1
+            rows.append((t0 + i * 60, value))
+        text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
+        path = write(self.tmp, "ranked_scores.csv", text)
+        r = byod.check_scores(path, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                              threshold=0.5)
+        res = r["results"]
+        self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.15, places=4)
+        self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 7.2, places=1)
+        self.assertTrue(res["alerted_rate_ratio_high"])
+        self.assertIn("Alerted far more often", byod.render_report(r))
+
+    def test_the_notice_is_visible_from_the_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(
+                "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n")
+            (d / "alerts.csv").write_text(
+                "start,end\n"
+                "2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n"
+                "2026-03-01T06:00:00Z,2026-03-01T09:06:00Z\n")
+            p = subprocess.run(
+                [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check",
+                 "--alerts", str(d / "alerts.csv"), "--incidents", str(d / "incidents.csv"),
+                 "--bucket", "60s", "--from", DAY_FROM, "--to", DAY_TO,
+                 "--out", str(d / "out")],
+                cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("Verdict: **PASS**", p.stdout)
+            self.assertIn("7.2 times as often as anything was wrong", p.stdout)
+            result = json.loads((d / "out" / "alerts" / "check_result.json").read_text())
+            self.assertTrue(result["results"]["alerted_rate_ratio_high"])
+
+
 class TestNearTheFloor(TempCase):
     """A lift near 1.0 is a verdict that moves with the bucket size, so the report says so.
 
@@ -846,11 +1233,40 @@ class TestBucketSweep(TempCase):
         self.assertIn("## The verdict at other bucket sizes", report)
         self.assertNotIn("The verdict is not stable", report)
 
-    def test_no_sweep_returns_the_single_bucket_verdict(self):
+    def test_no_sweep_returns_the_single_bucket_verdict_and_says_it_suppressed_one(self):
+        # --no-sweep used to skip the sweep, so a run that would have been UNSTABLE came
+        # back as the single-bucket verdict with nothing said about it. On one real export
+        # the same data and the same bucket gave UNSTABLE at exit 4 with the sweep and PASS
+        # at exit 0 with --no-sweep. The flag holds the verdict. It no longer hides why.
         r = self.unstable(sweep=False)
+        sweep = r["results"]["bucket_sweep"]
         self.assertEqual(r["verdict"], "EXCLUDE")
-        self.assertNotIn("bucket_sweep", r["results"])
-        self.assertNotIn("not stable across bucket sizes", byod.render_report(r))
+        self.assertFalse(sweep["applied"])
+        self.assertTrue(sweep["unstable"])
+        self.assertTrue(r["results"]["sweep_suppressed_unstable"])
+        report = byod.render_report(r)
+        self.assertIn("UNSTABLE suppressed by --no-sweep.", report)
+        self.assertIn("this run is UNSTABLE at exit 4", report)
+        self.assertIn("verdict above is EXCLUDE at the 1m bucket you picked", report)
+        self.assertLess(report.index("UNSTABLE suppressed by --no-sweep."),
+                        report.index("| Check | Section |"))
+
+    def test_no_sweep_on_a_stable_run_suppresses_nothing(self):
+        r = self.stable(sweep=False)
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertFalse(r["results"]["bucket_sweep"]["applied"])
+        self.assertFalse(r["results"]["sweep_suppressed_unstable"])
+        self.assertNotIn("suppressed by --no-sweep", byod.render_report(r))
+
+    def test_the_near_floor_notice_says_the_sweep_was_suppressed_too(self):
+        r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n", sweep=False)
+        self.assertTrue(r["results"]["near_floor"])
+        report = byod.render_report(r)
+        if r["results"]["bucket_sweep"]["unstable"]:
+            self.assertIn("Without --no-sweep the verdict would be UNSTABLE", report)
+        else:
+            self.assertIn("every one of them gave the same verdict", report)
 
     def test_a_run_that_cannot_be_evaluated_is_not_swept(self):
         outside = write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
@@ -998,6 +1414,159 @@ class TestScope(TempCase):
             self.assertEqual(r["inputs"][name]["scope_column"], "service")
         self.assertEqual(r["inputs"]["alerts"]["distinct_scopes"], 4)
         json.dumps(r)   # the whole result still serialises
+
+
+class TestEmptyScopeIntersection(TempCase):
+    """An empty intersection is usually a naming difference, not a system mismatch.
+
+    The second real run carried 31 scopes from Datadog's `service` tag, which are
+    application names like `is-api` and `is-admin-mongodb`, against exactly 1 scope from
+    PagerDuty's `service` field, which was `InvoiceSimple-Alerts`. That is one catch-all
+    routing destination. Both vendors call the field `service` and they mean different
+    things by it, so the intersection is empty by construction and always will be. The old
+    report called that a possible system mismatch and told the reader to filter both
+    exports to the scopes they share, which leaves an empty file.
+    """
+
+    # 31 application names on the alert side, one routing destination on the incident side.
+    DATADOG_SCOPES = ["is-api", "is-admin-mongodb"] + [f"is-worker-{i}" for i in range(29)]
+    PAGERDUTY_SCOPE = "InvoiceSimple-Alerts"
+
+    def vendor_run(self, alert_scopes=None, incident_scopes=None, **kwargs):
+        """Alert rows on one scope each, and two incidents on the incident scopes."""
+        alert_scopes = self.DATADOG_SCOPES if alert_scopes is None else alert_scopes
+        incident_scopes = ([self.PAGERDUTY_SCOPE] if incident_scopes is None
+                           else incident_scopes)
+        rows = ""
+        for n, scope in enumerate(alert_scopes):
+            h, m = n // 2, (n % 2) * 30
+            rows += f"2026-03-01T{h:02d}:{m:02d}:00Z,2026-03-01T{h:02d}:{m + 5:02d}:00Z,{scope}\n"
+        alerts = write(self.tmp, "vendor_alerts.csv", "start,end,service\n" + rows)
+        inc = "".join(
+            f"2026-03-01T{2 + n:02d}:00:00Z,2026-03-01T{2 + n:02d}:30:00Z,{scope}\n"
+            for n, scope in enumerate(incident_scopes))
+        incidents = write(self.tmp, "vendor_incidents.csv", "start,end,service\n" + inc)
+        opts = dict(t_from=DAY_FROM, t_to=DAY_TO, sweep=False)
+        opts.update(kwargs)
+        return byod.check_alerts(alerts, incidents, BUCKET, **opts)
+
+    def test_thirty_one_scopes_against_one_is_read_as_a_namespace(self):
+        s = self.vendor_run()["results"]["scope"]
+        self.assertEqual(s["alert_scopes"], 31)
+        self.assertEqual(s["incident_scopes"], 1)
+        self.assertEqual(s["shared_scopes"], 0)
+        self.assertTrue(s["empty_intersection"])
+        self.assertTrue(s["namespace_mismatch"])
+        self.assertEqual(s["single_scope_side"], "incidents")
+        self.assertEqual(s["single_scope_name"], self.PAGERDUTY_SCOPE)
+        # The unmatched share is still 1.0, and it is still a poor overlap by the old rule.
+        self.assertEqual(s["unmatched_alert_row_share"], 1.0)
+        self.assertTrue(s["poor_overlap"])
+
+    def test_the_notice_says_routing_destination_and_not_system_mismatch(self):
+        report = byod.render_report(self.vendor_run())
+        notice = report.index("Scope namespaces differ.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:report.index("| Check | Section |")]
+        self.assertIn("`InvoiceSimple-Alerts`", body)
+        self.assertIn("empty by construction", body)
+        self.assertIn("routing destination, not a system", body)
+        self.assertIn("not evidence that the two files describe different systems", body)
+        self.assertNotIn("Scope mismatch.", body)
+        self.assertNotIn("may be describing different systems", body)
+
+    def test_the_notice_withholds_the_filter_remedy_and_offers_a_usable_one(self):
+        body = byod.render_report(self.vendor_run())
+        self.assertIn("Do not filter both exports to the scopes they share", body)
+        self.assertNotIn("Filter both exports to the scopes they share and run this again",
+                         body)
+        self.assertIn("alert payload", body)
+        self.assertIn("title", body)
+        self.assertIn("--incident-scope-col", body)
+
+    def test_a_single_scope_on_the_alert_side_reads_the_same_way(self):
+        s = self.vendor_run(alert_scopes=["watchdog-default"],
+                            incident_scopes=["checkout", "billing", "search"]
+                            )["results"]["scope"]
+        self.assertTrue(s["namespace_mismatch"])
+        self.assertEqual(s["single_scope_side"], "alerts")
+        self.assertEqual(s["single_scope_name"], "watchdog-default")
+        report = byod.render_report(
+            self.vendor_run(alert_scopes=["watchdog-default"],
+                            incident_scopes=["checkout", "billing", "search"]))
+        self.assertIn("--scope-col", report[report.index("Scope namespaces differ."):])
+
+    def test_an_empty_intersection_on_both_sides_keeps_the_mismatch_reading(self):
+        # Several names on each side and none in common. That really can be two estates,
+        # so the mismatch reading stays. Only the unusable filter remedy is withheld.
+        r = self.vendor_run(alert_scopes=["checkout", "billing", "search"],
+                            incident_scopes=["ledger", "payments"])
+        s = r["results"]["scope"]
+        self.assertTrue(s["empty_intersection"])
+        self.assertFalse(s["namespace_mismatch"])
+        report = byod.render_report(r)
+        body = report[report.index("Scope mismatch."):report.index("| Check | Section |")]
+        self.assertIn("may be describing different systems", body)
+        self.assertIn("not a remedy here", body)
+        self.assertIn("intersection is empty", body)
+        self.assertNotIn("Filter both exports to the scopes they share and run this again",
+                         body)
+        self.assertNotIn("Scope namespaces differ.", report)
+
+    def test_two_scopes_against_many_are_not_called_a_namespace(self):
+        # The threshold is one distinct scope, not a ratio. Two names could be a short list
+        # of real services, and one name cannot be a list at all.
+        s = self.vendor_run(incident_scopes=["InvoiceSimple-Alerts", "InvoiceSimple-P1"]
+                            )["results"]["scope"]
+        self.assertEqual(s["incident_scopes"], 2)
+        self.assertTrue(s["empty_intersection"])
+        self.assertFalse(s["namespace_mismatch"])
+
+    def test_a_partial_overlap_is_untouched(self):
+        # One name in common, so the intersection is not empty and the old wording and the
+        # old remedy both still apply.
+        r = self.vendor_run(alert_scopes=["checkout", "billing", "search"],
+                            incident_scopes=["checkout"])
+        s = r["results"]["scope"]
+        self.assertEqual(s["shared_scopes"], 1)
+        self.assertFalse(s["empty_intersection"])
+        self.assertFalse(s["namespace_mismatch"])
+        report = byod.render_report(r)
+        self.assertIn("Scope mismatch.", report)
+        self.assertIn("may be describing different systems", report)
+        self.assertIn("Filter both exports to the scopes they share and run this again",
+                      report)
+
+    def test_the_namespace_reading_still_filters_nothing(self):
+        # Scope stays reported and never applied, whatever it is read as.
+        scoped = self.vendor_run(alert_scopes=["is-api", "is-admin-mongodb"])
+        plain = byod.check_alerts(
+            write(self.tmp, "plain_alerts.csv",
+                  "start,end\n"
+                  "2026-03-01T00:00:00Z,2026-03-01T00:05:00Z\n"
+                  "2026-03-01T00:30:00Z,2026-03-01T00:35:00Z\n"),
+            write(self.tmp, "plain_incidents.csv",
+                  "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n"),
+            BUCKET, t_from=DAY_FROM, t_to=DAY_TO, sweep=False)
+        self.assertTrue(scoped["results"]["scope"]["namespace_mismatch"])
+        for key in ("prevalence", "precision", "recall", "f1_score", "tp", "fp", "fn", "tn"):
+            self.assertEqual(scoped["results"][key], plain["results"][key], key)
+        self.assertEqual(scoped["verdict"], plain["verdict"])
+
+    def test_the_assumption_line_says_which_side_carries_the_destination(self):
+        joined = " ".join(self.vendor_run()["assumptions"])
+        self.assertIn("two naming schemes", joined)
+        self.assertIn("InvoiceSimple-Alerts", joined)
+        self.assertIn("one routing destination rather than one system", joined)
+        self.assertIn("No row was filtered by it", joined)
+
+    def test_the_new_scope_keys_serialise(self):
+        r = self.vendor_run()
+        self.assertTrue(json.dumps(r))
+        for key in ("empty_intersection", "namespace_mismatch", "single_scope_side",
+                    "single_scope_name"):
+            self.assertIn(key, r["results"]["scope"])
 
 
 class TestConstantScore(TempCase):

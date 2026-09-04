@@ -197,7 +197,7 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 | Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | `fdes/vus.py`, `tables/vus.csv`, pilot report |
 | Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
 | Flag-everything guard: F1 within 5 percent of the floor, above or below it, with recall at or above 0.95 | 8b | `fdes/checks.py::flag_everything`, `sec8b_flag_everything` |
-| Flag-everything guard on the alerted rate: alerting on at least half the wall-clock time and at least four times as often as anything is anomalous | 8b | `fdes/checks.py::alert_rate_saturated`, `alert_rate_far_above_prevalence`, `make check` only |
+| Flag-everything guard on the alerted rate: alerting on at least half the wall-clock time at four times prevalence, or on at least a fifth of it at ten times prevalence | 8b | `fdes/checks.py::alert_rate_saturated`, `alert_rate_far_above_prevalence`, `make check` only |
 | Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
 | Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | artifact `training.py`, and `fdes/protocol.py` for pilots |
 | Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
@@ -366,6 +366,29 @@ make check SCORES=my_scores.csv INCIDENTS=my_incidents.csv BUCKET=5m \
 Exit code 0 means PASS, 2 means EXCLUDE, 3 means INSUFFICIENT and 4 means UNSTABLE. The run
 writes `out/check/<name>/check_result.json` and `check_report.md`.
 
+### Where the incident windows came from
+
+The check compares one set of windows against another. It cannot tell whether the two came
+from the same place. If your incident windows were built from the alerts you are scoring, or
+from anything downstream of the detector under test, the result is circular and means
+nothing. It will usually look excellent.
+
+This is easy to do by accident. Deriving incident windows by clustering the detector's own
+alerts gives near-perfect recall and a high lift, because every incident was defined by an
+alert. Grouping tickets opened by the monitoring system under test does the same thing one
+step removed. So does a tracker whose incidents are auto-created from those alerts.
+
+Ground truth has to come from somewhere the detector cannot reach. Human-declared incidents,
+customer-reported outages, postmortems, or a monitoring stack with no shared inputs. If you
+must derive windows from alerts, split by provenance first. Score the detector's alerts only
+against windows built from sources it does not feed.
+
+State where your windows came from when you report a result. A verdict without that is not
+interpretable, whichever way it went.
+
+The tool cannot check any of this, so every report says so in the assumption list. That line
+is the only place many readers will meet it.
+
 ### Getting alert data out of a real vendor
 
 This is the hardest part of using the tool and it has nothing to do with the tool. The
@@ -521,6 +544,33 @@ Scope strings are compared for equality, so two exports naming the same service 
 (`checkout` against `checkout-api`, or a Datadog tag against a PagerDuty service name) read
 as no overlap at all. Normalise the names in the CSVs before you trust the share.
 
+**An empty intersection is usually a naming difference.** A second real run carried 31
+scopes from Datadog's `service` tag, which are application names like `is-api` and
+`is-admin-mongodb`, against exactly 1 scope from PagerDuty's `service` field, which was
+`InvoiceSimple-Alerts`. That is one catch-all routing destination, and a single catch-all
+PagerDuty service is the normal setup. Both vendors legitimately call the field `service`
+and they mean different things by it. Datadog means the application the signal came from.
+PagerDuty means where the page was sent. The intersection is empty by construction and it
+always will be.
+
+Two things follow, and the report used to get both of them wrong. The unmatched share reads
+100 percent whatever the detector did, so it is not evidence of a system mismatch. And the
+remedy for a poor overlap, filtering both exports to the scopes they share, leaves an empty
+file. So when the intersection is empty and one side carries exactly one distinct scope, the
+report says the two files are using two naming schemes rather than describing two systems,
+withholds the filter remedy, and points at taking the incident scope from the alert payload
+the incident was created from or from the incident title.
+
+The threshold is one distinct scope, not a ratio. One value cannot be a partial list of
+application names, so the reading is unambiguous. Two or three names against thirty is
+suggestive of the same thing and it is not unambiguous, because two exports really can cover
+two small estates that do not overlap. Those keep the mismatch reading. They lose only the
+filter remedy, which cannot be followed on an empty intersection either way. A genuine
+partial overlap, where at least one name appears on both sides, is untouched and still gets
+the original wording and the original remedy. `SCOPE_NAMESPACE_MAX_SCOPES` in `fdes/byod.py`
+sets the threshold, and `check_result.json` carries `empty_intersection`,
+`namespace_mismatch`, `single_scope_side` and `single_scope_name` under `results.scope`.
+
 **Scope is reported and never applied.** No row is filtered by it and no number moves
 because of it, so the same two files give the same verdict with the column and without it.
 Filtering both exports to the scopes they share is a decision about what you are measuring,
@@ -546,6 +596,12 @@ it. The pilot path uses the first three verdicts and the same exit codes.
 | `EXCLUDE` | 2 | the input supported a verdict and the detector failed a check | the detector is not worth deploying as it stands |
 | `INSUFFICIENT` | 3 | the input could not support a verdict either way | fix the CSVs or the range, then run it again |
 | `UNSTABLE` | 4 | the verdict changed across bucket sizes, so no single verdict is the result (alerts mode) | pick the bucket from the time scale your responders work at and say why, or treat it as undecided |
+
+`--no-sweep` holds the verdict and the exit code at the bucket you passed. It does not hide
+what the sweep found. A run that would have been `UNSTABLE` says so at the top of the report
+and names the exit code it would have had. It used to skip the sweep entirely, so the same
+data at the same bucket came back as `UNSTABLE` at exit 4 with the sweep and `PASS` at exit
+0 without it, with nothing said either way.
 
 A non-zero exit is not a crash here. Only 1 means the command failed, and no verdict uses
 it, so continuous integration can branch on the code without reading the output. `make
@@ -588,33 +644,81 @@ time and was correctly excluded, so the verdict turned on the bucket size.
 The alerted rate against prevalence separates the two cases cleanly. A detector that works
 alerts about as often as things are actually anomalous, so its alerted rate sits near
 prevalence. A detector that flags everything alerts far more often than anything is wrong.
-The guard fires when both of these hold.
 
-1. The alerted rate is at or above 0.5, so the detector spends the majority of the
-   wall-clock time in an alerting state and silence is the exception.
-2. The alerted rate is at or above four times prevalence.
+There are two ways into the guard and a detector only has to walk through one of them.
 
-Both conditions are needed, and each one protects a case the other would get wrong.
-Without the first, a detector watching for rare incidents would be condemned for working:
-at a prevalence of 0.001, alerting on 1 percent of the time with perfect recall is
-excellent and is still ten times prevalence. Without the second, a detector would be
-condemned for the shape of its data: where most of the time really is anomalous, say a
-prevalence of 0.6, a perfect detector alerts 60 percent of the time and has to keep its
-`PASS`.
+**Path A, the obvious case.** The alerted rate is at or above 0.5, so the detector spends
+the majority of the wall-clock time in an alerting state and silence is the exception, and
+it is at or above four times prevalence. The alerted rate divided by prevalence is recall
+divided by precision, so the multiple of four says that at full recall no more than one
+alert in four lands on an incident. The multiple is what stops a detector being condemned
+for the shape of its data. Where most of the time really is anomalous, say a prevalence of
+0.6, a perfect detector alerts 60 percent of the time and has to keep its `PASS`.
 
-The alerted rate divided by prevalence is recall divided by precision, so the multiple of
-four says that at full recall no more than one alert in four lands on an incident. A
-perfect detector has an alerted rate equal to prevalence, so it cannot be caught by this
-guard at any prevalence. That matters, because the one-sided version of section 8b this
-package used to ship excluded any detector with recall at or above 0.95 whatever its F1,
-which wrongly excluded a detector scoring F1 1.0 at recall 1.0. The two-sided margin fixed
-that and opened the hole above. Reading the alerted rate closes the hole without
-reopening the original defect.
+**Path B, the case path A cannot see.** Path A alone had a defect that took a second real
+dataset to find. Four times 0.125 is 0.5, so the multiple is implied by the rate whenever
+prevalence is under 0.125, and real incident data almost never sits above that. On real data
+path A collapsed to "alerts more than half the time" and the ratio never bound on anything.
+Measured at a prevalence of 0.0397, a detector alerting on 40 percent of a fourteen day
+timeline is alerting 10.1 times as often as anything was wrong, and it passed at exit 0 with
+the best F1 in the table. A rate of 0.499 passed and 0.500 excluded. A step function, with
+nothing between prevalence and 0.5 looking at all.
 
-`ALERT_RATE_SATURATION` and `ALERT_RATE_MULTIPLE` in `fdes/checks.py` set the two
-thresholds. The guard applies in both modes, and in scores mode it applies at whatever
-operating point the threshold produces, so a score that ranks buckets well still cannot
-reach `PASS` while its operating point flags most of the timeline.
+So path B fires at a lower alerted rate when the ratio is high enough to earn it. The
+alerted rate is at or above 0.20 and at or above ten times prevalence.
+
+The floor of 0.20 is what now protects the case the 0.5 floor was protecting. At very low
+prevalence a rare-incident detector legitimately alerts many times more often than incidents
+occur and must keep its `PASS`. At a prevalence of 0.001, alerting on 1 percent of the time
+with perfect recall is excellent work and is ten times prevalence, and 0.01 is a twentieth
+of this floor. A detector in an alerting state for one hour in five is not watching for a
+rare event, whatever its prevalence.
+
+The multiple of ten is two and a half times path A's, and that is the price of the lower
+floor. At full recall it means fewer than one alert in ten lands on an incident. The band
+the two paths leave open is narrow on purpose. A detector alerting between a fifth and a
+half of the time keeps its `PASS` at any ratio under ten.
+
+A perfect detector has an alerted rate equal to prevalence, so the multiple fails for it on
+both paths at any prevalence. It cannot be caught here. That matters, because the one-sided
+version of section 8b this package used to ship excluded any detector with recall at or
+above 0.95 whatever its F1, which wrongly excluded a detector scoring F1 1.0 at recall 1.0.
+The two-sided margin fixed that and opened the hole above. Reading the alerted rate closes
+the hole without reopening the original defect.
+
+`ALERT_RATE_SATURATION`, `ALERT_RATE_MULTIPLE`, `ALERT_RATE_RATIO_FLOOR` and
+`ALERT_RATE_RATIO_MULTIPLE` in `fdes/checks.py` set the four thresholds. The guard applies
+in both modes, and in scores mode it applies at whatever operating point the threshold
+produces, so a score that ranks buckets well still cannot reach `PASS` while its operating
+point flags most of the timeline.
+
+**Known limit.** Both floors sit above where the real detectors measured so far actually
+landed. Across two independent datasets, twelve bucket sizes and two ground-truth variants,
+the alerted rate topped out at 0.396 on one and 0.486 on the other, while the ratio ran from
+11.7 to 14.7. Path B now catches the top of that range and the band under it is still open.
+So the ratio is doing the informing and the floors are doing the excluding, and the report
+prints the ratio next to the verdict whenever it reaches four times prevalence and neither
+path fired. Two datasets is not enough to move a floor again. It is enough to say where the
+floors sit relative to the evidence.
+
+### There is no minimum recall
+
+Nothing in this procedure sets a floor on recall, and a `PASS` can be carried by lift alone.
+One real run gave four instantaneous alerts over four days. Recall 0.071, F1 0.130, lift
+1.85, `PASS` at exit 0. The detector missed 93 percent of the incident time.
+
+That is deliberate. A high-precision detector that fires rarely and is usually right is a
+real thing worth keeping, and excluding it would be wrong. Bucket-level recall is also
+pushed down by the export format as much as by the detector. A file of instantaneous alerts
+cannot reach high bucket recall whatever the detector did, because one alert covers one
+bucket while an incident covers many. A recall floor would mostly be measuring the export.
+
+It is not left silent. When the verdict is a `PASS` and recall is under 0.5, the detector
+missed more incident time than it caught, and the report says so next to the verdict along
+with the precision and the floor that carried the verdict instead. `LOW_RECALL_NOTICE` in
+`fdes/byod.py` sets the band, and `check_result.json` carries it as `low_recall`. If you
+needed a detector to catch incidents rather than to confirm them, read that line before you
+read the verdict.
 
 ### When the lift sits near the floor
 
@@ -730,11 +834,13 @@ used.
 | Predict-all baseline F1 = 2p/(1+p), and F1 minus it | 2, 7 | yes | yes |
 | Lift over the predict-all baseline | 7 | yes | yes |
 | Flag-everything guard on F1 and recall | 8b | yes | yes |
-| Flag-everything guard on the alerted rate against prevalence | 8b | yes | yes |
+| Flag-everything guard on the alerted rate against prevalence, on either of two paths | 8b | yes | yes |
+| The alerted rate over prevalence, reported when it is high and neither path fired | input quality | yes | yes |
+| A notice when a `PASS` sits on recall under 0.5 | input quality | yes | yes |
 | Degenerate output guard (alerts on all, alerts on none, one near-constant score) | 8 | yes | yes |
 | Implausibly long and lopsided incident rows | input quality | yes | yes |
-| Verdict at 1m, 5m, 15m and 1h, and whether they agree | input quality | yes | **no** |
-| Scope overlap between the two files | input quality | yes, when both files carry a scope column | **no** |
+| Verdict at 1m, 5m, 15m and 1h, and whether they agree | input quality | yes, and `--no-sweep` still reports it | **no** |
+| Scope overlap between the two files, and whether an empty one is a naming difference | input quality | yes, when both files carry a scope column | **no** |
 | AUC-ROC against its 0.5 reference | 6, 7, 8a | **no** | yes |
 | PR-AUC against its p reference | 6, 7 | **no** | yes |
 | VUS-PR and VUS-ROC | 6 | **no** | yes, but only when every bucket in the range holds a score sample |
@@ -816,7 +922,7 @@ Timeline 2026-03-01T00:00:00Z to 2026-03-08T00:00:00Z, 2016 buckets of 300 s.
 | Threshold-independent (PR) | 6, 7 | NOT COMPUTED | p | see below |
 | Range-based (VUS) | 6 | NOT COMPUTED | | see below |
 | Flag-everything guard | 8b | recall = 0.078, alerted rate = 0.104 | F1 within 5% of floor and recall >= 0.95 | pass |
-| Alerted rate against prevalence | 8b | alerted rate = 0.104, p = 0.0506 | alerted rate >= 0.5 and >= 4 x p | pass |
+| Alerted rate against prevalence | 8b | alerted rate = 0.104, p = 0.0506, ratio = 2.1x | rate >= 0.5 and >= 4 x p, or rate >= 0.2 and >= 10 x p | pass |
 | Degenerate output guard | 8 | alerted rate = 0.104, distinct scores = n/a | alerts on all, alerts on none, or one near-constant score | pass |
 
 ## Operating point
@@ -860,9 +966,12 @@ sweep. [...]
    your events are shorter than a second.
 4. The incident windows were taken as exact ground truth. Postmortem and incident-tracker
    times usually are not. [...]
-5. A tracker close time is a record of when somebody closed a ticket, not a record of when
+5. Provenance was not checked. This tool cannot tell whether your incident windows were
+   derived from the alerts being scored. If they were, the result is circular. See "Where
+   the incident windows came from".
+6. A tracker close time is a record of when somebody closed a ticket, not a record of when
    impact stopped. A row left open over a weekend covers the weekend. [...]
-6. Scope was not checked. Neither file carries a column this tool recognises as a service
+7. Scope was not checked. Neither file carries a column this tool recognises as a service
    or scope, so name one with --scope-col and --incident-scope-col if you have it. [...]
 ```
 

@@ -42,7 +42,8 @@ import numpy as np
 import pandas as pd
 
 from . import SPEC_VERSION
-from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_SATURATION, DEGENERATE_AUC,
+from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_RATIO_FLOOR,
+                     ALERT_RATE_RATIO_MULTIPLE, ALERT_RATE_SATURATION, DEGENERATE_AUC,
                      DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE, RANDOM_AUC_REFERENCE,
                      RECALL_SATURATION, alert_rate_saturated, check_state, flag_everything,
                      predict_all_f1)
@@ -76,6 +77,36 @@ OVERLAP_NOTICE = 0.10
 NEAR_FLOOR_BAND = 0.20
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
+
+# ------------------------------------------- the alerted rate ratio, reported not excluded
+# The guard in fdes/checks.py has two ways in and neither of them reaches a detector that
+# alerts on a modest share of the time at a ratio well above prevalence. Path A wants an
+# alerted rate of 0.5, path B wants 0.20 with a ratio of 10. A detector alerting on a tenth
+# of the timeline at eight times prevalence walks past both, and on real exports that band
+# is where a lot of them sit. The ratio measured on the second real run ran from 11.7 to
+# 14.7 while the alerted rate topped out at 0.396 and 0.486, and the report said nothing
+# about the ratio at all.
+#
+# So the ratio is reported wherever it is high and the guard did not act on it. The
+# reporting threshold is path A's multiple rather than a new number, because that is the
+# smallest ratio anything in this package already treats as worth a second look. A lower
+# threshold would fire on ordinary detectors, and a higher one would leave a gap under the
+# guard's own bar.
+RATIO_NOTICE_MULTIPLE = ALERT_RATE_MULTIPLE
+
+# ------------------------------------------------------------------------- thin recall
+# Nothing in the procedure sets a minimum recall, and that is deliberate. See the README
+# section "There is no minimum recall". A high-precision detector that fires rarely and is
+# usually right is a real thing worth keeping, and bucket-level recall is pushed down by the
+# export format as much as by the detector. A file of instantaneous alerts cannot reach high
+# bucket recall whatever the detector did, because an alert covers one bucket and an
+# incident covers many.
+#
+# But a PASS at recall 0.071, which one real run produced from four instantaneous alerts
+# over four days, is carried entirely by precision and by a low floor. The detector missed
+# 93 percent of the incident time. Below this recall the detector misses more incident time
+# than it catches, so the PASS gets a line saying so and the reader decides.
+LOW_RECALL_NOTICE = 0.50
 
 # --------------------------------------------------------------------- the bucket sweep
 # Alerts mode re-runs the whole check at each of these bucket sizes, plus whatever size the
@@ -127,6 +158,30 @@ CONCENTRATION_MIN_ROWS = 5
 # When this share of the alert rows falls on a scope that appears in no incident, the two
 # files are probably not describing the same system.
 SCOPE_OVERLAP_POOR = 0.50
+
+# ------------------------------------------------------- an empty scope intersection
+# An empty intersection is a different thing from a poor overlap, and the remedy for a poor
+# overlap does not work on it. Filtering both exports to the scopes they share leaves an
+# empty file when there is nothing in the intersection.
+#
+# One shape of empty intersection is not a system mismatch at all. A second real run carried
+# 31 scopes from Datadog's `service` tag, which are application names such as `is-api` and
+# `is-admin-mongodb`, against exactly 1 scope from PagerDuty's `service` field, which was
+# `InvoiceSimple-Alerts`, a single catch-all routing destination. Both vendors call the
+# field `service` and they mean different things by it. Datadog means the application the
+# signal came from. PagerDuty means where the page was sent. The intersection is empty by
+# construction and always will be, and the 100 percent unmatched share measures the naming
+# rather than the systems.
+#
+# A side carrying exactly one distinct scope is the signature of that. One value cannot be a
+# partial list of application names, it is a constant, so the reading is unambiguous and the
+# tool says so plainly.
+#
+# Two or three scopes against thirty is suggestive of the same thing and it is not
+# unambiguous, because two exports really can cover two small overlapping estates. So the
+# threshold stays at one. Every other empty intersection is still reported as a possible
+# system mismatch, and only the unusable filter remedy is withheld from it.
+SCOPE_NAMESPACE_MAX_SCOPES = 1
 
 _TZ_SUFFIX = re.compile(r"(?:Z|z|[+-]\d{2}:?\d{2})$")
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
@@ -225,7 +280,7 @@ def parse_timestamps(values: pd.Series, where: str) -> tuple[np.ndarray, dict]:
     elif naive:
         tz_note = (f"{naive} of {len(text)} rows carried no timezone and were read as UTC, "
                    f"while the rest did carry one. Mixing the two in one file is a mistake "
-                   f"unless your naive rows really are UTC.")
+                   f"unless your naive rows really are UTC")
     return seconds, {"format": fmt, "timezone": tz_note,
                      "naive_rows": naive, "total_rows": int(len(text))}
 
@@ -550,6 +605,10 @@ def scope_overlap(grid: dict, a_starts: np.ndarray, a_ends: np.ndarray, a_scopes
         "alert_scope_column": a_note.get("scope_column"),
         "incident_scope_column": i_note.get("scope_column"),
         "poor_overlap": False,
+        "empty_intersection": False,
+        "namespace_mismatch": False,
+        "single_scope_side": None,
+        "single_scope_name": None,
     }
     if not out["alert_scope_column"] or not out["incident_scope_column"]:
         return out
@@ -579,6 +638,21 @@ def scope_overlap(grid: dict, a_starts: np.ndarray, a_ends: np.ndarray, a_scopes
         "poor_overlap_threshold": SCOPE_OVERLAP_POOR,
     })
     out["poor_overlap"] = bool(a_rows and unmatched_alerts / len(a_rows) >= SCOPE_OVERLAP_POOR)
+
+    # Both sides name something and they share nothing. The share of unmatched alert rows is
+    # 1.0 here whatever the detector did, so it is not a measurement of anything, and the
+    # filter remedy cannot be followed because the intersection is empty.
+    out["empty_intersection"] = bool(a_set and i_set and not shared)
+    single_side = single_name = None
+    if out["empty_intersection"]:
+        if len(i_set) <= SCOPE_NAMESPACE_MAX_SCOPES < len(a_set):
+            single_side, single_name = "incidents", sorted(i_set)[0]
+        elif len(a_set) <= SCOPE_NAMESPACE_MAX_SCOPES < len(i_set):
+            single_side, single_name = "alerts", sorted(a_set)[0]
+    out["single_scope_side"] = single_side
+    out["single_scope_name"] = single_name
+    # A routing-destination namespace, not a system mismatch. See SCOPE_NAMESPACE_MAX_SCOPES.
+    out["namespace_mismatch"] = bool(single_side)
     return out
 
 
@@ -945,8 +1019,13 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     sec8a = bool(computed.get("auc_roc") is not None
                  and computed["auc_roc"] <= RANDOM_AUC_REFERENCE)
     sec8b = flag_everything(pm["f1_score"], pm["recall"], floor)
-    alert_rate = deg["alerted_rate"]
+    # The guard and the ratio read the unrounded rate. deg["alerted_rate"] is rounded for
+    # display, and at a low prevalence that rounding moves the ratio by a whole percent.
+    alert_rate = float(pred.mean()) if n else 0.0
     saturated = bool(both_classes and alert_rate_saturated(alert_rate, prevalence))
+    # Which of the guard's two paths let it through, so the reason can say the right thing.
+    path_a = bool(saturated and alert_rate >= ALERT_RATE_SATURATION
+                  and alert_rate >= ALERT_RATE_MULTIPLE * prevalence)
     no_lift = bool(both_classes and pm["f1_score"] <= floor)
     table12 = bool(computed.get("auc_roc") is not None
                    and computed["auc_roc"] <= DEGENERATE_AUC
@@ -971,11 +1050,15 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                            f"{round(floor, 4)} while recall {pm['recall']} is at or above "
                            f"{RECALL_SATURATION}, which is the flag-everything regime")
         if saturated and not deg["alerts_on_everything"]:
+            where = ("on the majority of the wall-clock time" if path_a else
+                     f"on {alert_rate * 100:.1f} percent of the wall-clock time, which is "
+                     f"over the {ALERT_RATE_RATIO_FLOOR * 100:.0f} percent that a ratio this "
+                     f"high is measured against")
             reasons.append(
                 f"The detector alerted on {alert_rate * 100:.1f} percent of the buckets in "
                 f"the range while only {prevalence * 100:.1f} percent of them fall inside an "
                 f"incident window. That is {alert_rate / prevalence:.0f} times as often as "
-                f"anything was wrong, on the majority of the wall-clock time, which is the "
+                f"anything was wrong, {where}, which is the "
                 f"flag-everything regime measured by alerted time rather than by F1")
         if no_lift and not sec8b:
             reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
@@ -1007,6 +1090,21 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["near_floor"] = bool(evaluable and lift is not None
                                   and abs(lift - 1.0) <= NEAR_FLOOR_BAND)
     computed["near_floor_band"] = NEAR_FLOOR_BAND
+    # How many times more often the detector alerted than anything was wrong. The guard
+    # above needs this AND an alerted rate over an absolute floor, and on real exports the
+    # ratio kept firing while the floor kept the guard silent. So the number is reported
+    # whenever it is high and the guard did not act on it, and the reader judges it.
+    ratio = round(alert_rate / prevalence, 2) if both_classes and prevalence > 0 else None
+    computed["alerted_rate_over_prevalence"] = ratio
+    computed["alerted_rate_ratio_notice_multiple"] = RATIO_NOTICE_MULTIPLE
+    computed["alerted_rate_ratio_high"] = bool(
+        evaluable and not saturated and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
+    computed["alert_rate_path"] = ("A" if path_a else "B") if saturated else None
+    # There is no minimum recall, on purpose. A PASS carried by precision alone is still
+    # worth naming, because the detector missed more incident time than it caught.
+    computed["low_recall"] = bool(evaluable and not reasons
+                                  and pm["recall"] < LOW_RECALL_NOTICE)
+    computed["low_recall_band"] = LOW_RECALL_NOTICE
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
     else:
@@ -1063,11 +1161,18 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
     # The sweep only runs on a verdict there is something to be unstable about. An
     # INSUFFICIENT run has no verdict at any bucket size, so nothing is gained by asking
     # four more times.
-    if sweep and computed["verdict"] in ("PASS", "EXCLUDE"):
+    #
+    # It runs even under --no-sweep. That flag holds the verdict and the exit code at the
+    # bucket the user picked, and it used to do that by not looking, which meant a run that
+    # would have been UNSTABLE came back as a clean PASS at exit 0 with nothing said. The
+    # flag now suppresses the verdict change and says it suppressed it.
+    if computed["verdict"] in ("PASS", "EXCLUDE"):
         sw = bucket_sweep(grid, a_start, a_end, a_note, i_start, i_end, i_note)
+        sw["applied"] = bool(sweep)
         computed["bucket_sweep"] = sw
-        if sw["unstable"]:
+        if sw["unstable"] and sweep:
             computed["verdict"] = "UNSTABLE"
+        computed["sweep_suppressed_unstable"] = bool(sw["unstable"] and not sweep)
 
     assumptions = range_note + timestamp_assumptions([a_note, i_note], bucket_s)
     assumptions += scope_assumptions(computed["scope"])
@@ -1146,7 +1251,9 @@ def check_scores(scores_csv: Path, incidents_csv: Path, bucket: str | None = Non
     # the reader to notice the check is missing.
     computed["scope"] = {"checked": False, "alert_scope_column": None,
                          "incident_scope_column": i_note.get("scope_column"),
-                         "poor_overlap": False, "mode": "scores"}
+                         "poor_overlap": False, "empty_intersection": False,
+                         "namespace_mismatch": False, "single_scope_side": None,
+                         "single_scope_name": None, "mode": "scores"}
 
     assumptions = (bucket_note + range_note + [thr_note]
                    + timestamp_assumptions([s_note, i_note], bucket_s))
@@ -1229,6 +1336,9 @@ def timestamp_assumptions(notes: list[dict], bucket_s: int) -> list[str]:
                   "after the signal came back. A detector that fires early is charged a "
                   "false positive for it, and one that stops early is charged a false "
                   "negative. Tighten the windows if you know better than the tracker does.")
+    unique.append("Provenance was not checked. This tool cannot tell whether your incident "
+                  "windows were derived from the alerts being scored. If they were, the "
+                  "result is circular. See \"Where the incident windows came from\".")
     unique.append("A tracker close time is a record of when somebody closed a ticket, not a "
                   "record of when impact stopped. A row left open over a weekend covers the "
                   "weekend. Building the incident windows from when alerting started and "
@@ -1238,6 +1348,19 @@ def timestamp_assumptions(notes: list[dict], bucket_s: int) -> list[str]:
 
 def scope_assumptions(scope: dict) -> list[str]:
     """What the run did or did not check about the two files describing the same system."""
+    if scope.get("namespace_mismatch"):
+        side = scope["single_scope_side"]
+        return [f"Scope was checked and the two files turned out to be using two naming "
+                f"schemes. The alerts file names its scope in "
+                f"`{scope['alert_scope_column']}` and the incidents file in "
+                f"`{scope['incident_scope_column']}`, with "
+                f"{scope['alert_scopes']} distinct scopes on the alert side and "
+                f"{scope['incident_scopes']} on the incident side, sharing none. The whole "
+                f"`{side}` file sits on `{scope['single_scope_name']}`, which is one routing "
+                f"destination rather than one system, so the overlap could not have come out "
+                f"any other way. Scope is only reported. No row was filtered by it, and the "
+                f"{scope['alert_rows_on_unmatched_scopes']} unmatched alert rows are still "
+                f"counted as false positives."]
     if scope.get("checked"):
         return [f"Scope was checked. The alerts file names its scope in "
                 f"`{scope['alert_scope_column']}` and the incidents file in "
@@ -1359,13 +1482,75 @@ def near_floor_notice(res: dict, grid: dict) -> str:
     if not sweep:
         return head + (f"Run this again with a few other --bucket values, for example "
                        f"{', '.join(others)}, and trust the verdict only if they agree.")
-    if sweep["unstable"]:
+    if sweep["unstable"] and sweep.get("applied", True):
         return head + ("The bucket sweep above re-ran this input at other --bucket values "
                        "and they do not agree, which is why the verdict is UNSTABLE.")
+    if sweep["unstable"]:
+        return head + ("The bucket sweep above re-ran this input at other --bucket values "
+                       "and they do not agree. Without --no-sweep the verdict would be "
+                       "UNSTABLE.")
     listed = ", ".join(r["bucket"] for r in sweep["buckets"])
     return head + (f"The bucket sweep re-ran this input at other --bucket values ({listed}) "
                    f"and every one of them gave the same verdict, so the verdict holds even "
                    f"though the margin is thin. The table is below.")
+
+
+def alerted_rate_ratio_notice(res: dict) -> str:
+    """The line that says the detector alerted far more often than anything was wrong.
+
+    The guard did not fire, so this is not an exclusion and it is not phrased as one. It
+    hands over the number the guard measured and the reason the guard let it through.
+    """
+    deg = res["degenerate_output"]
+    ratio = res["alerted_rate_over_prevalence"]
+    rate = deg["alerted_rate"]
+    if rate < ALERT_RATE_RATIO_FLOOR:
+        why = (f"Neither path of the flag-everything guard reaches it. Both of them ask the "
+               f"alerted rate to clear an absolute floor first, {ALERT_RATE_SATURATION} on "
+               f"one path and {ALERT_RATE_RATIO_FLOOR} on the other, and {_fmt(rate, 3)} is "
+               f"under both. Those floors are there so that a detector watching for rare "
+               f"incidents is not condemned for working. At a prevalence of 0.001, alerting "
+               f"on 1 percent of the time with perfect recall is excellent work and is "
+               f"still ten times prevalence.")
+    else:
+        why = (f"Neither path of the flag-everything guard reaches it. One path needs an "
+               f"alerted rate of {ALERT_RATE_SATURATION} and {_fmt(rate, 3)} is under that. "
+               f"The other accepts {ALERT_RATE_RATIO_FLOOR} but wants a ratio of "
+               f"{int(ALERT_RATE_RATIO_MULTIPLE)}, and {ratio:.1f} is under that. This run "
+               f"sits in the band between them.")
+    return (f"Alerted far more often than anything was wrong. The detector alerted on "
+            f"{rate * 100:.1f} percent of the buckets in the range while "
+            f"{res['prevalence'] * 100:.1f} percent of them fall inside an incident window. "
+            f"That is {ratio:.1f} times as often as anything was wrong, over the "
+            f"{int(RATIO_NOTICE_MULTIPLE)} times this package treats as worth a second "
+            f"look. {why} So this run keeps its verdict and the ratio is reported rather "
+            f"than acted on. The ratio is recall divided by precision, so at recall "
+            f"{_fmt(res['recall'])} and precision {_fmt(res['precision'])} it says roughly "
+            f"{ratio:.0f} alerted buckets arrived for every bucket of real incident. "
+            f"Whether that is a working detector or a pager you would stop reading is a "
+            f"judgement about your on-call load, and it is yours.")
+
+
+def low_recall_notice(res: dict) -> str:
+    """The line that says a PASS was carried by precision rather than by coverage.
+
+    This is not an exclusion and there is no minimum recall in the procedure. See
+    LOW_RECALL_NOTICE for why not.
+    """
+    missed = 1.0 - res["recall"]
+    return (f"Thin recall behind this verdict. The detector caught "
+            f"{res['recall'] * 100:.1f} percent of the incident time and missed "
+            f"{missed * 100:.1f} percent of it. The verdict above is carried by precision "
+            f"{_fmt(res['precision'])} and by a predict-all floor of "
+            f"{_fmt(res['f1_predict_all'])}, which is low because incidents are rare here. "
+            f"There is no minimum recall in this procedure, on purpose. A detector that "
+            f"fires rarely and is usually right is a real thing worth keeping, and "
+            f"bucket-level recall is pushed down by the export format as much as by the "
+            f"detector. A file of instantaneous alerts cannot reach high bucket recall "
+            f"whatever the detector did, because one alert covers one bucket while an "
+            f"incident covers many. So this is said rather than acted on. If you needed "
+            f"this detector to catch incidents rather than to confirm them, the verdict "
+            f"above does not tell you it will.")
 
 
 def sweep_table(sweep: dict) -> list[str]:
@@ -1385,16 +1570,30 @@ def sweep_table(sweep: dict) -> list[str]:
     return lines
 
 
-def sweep_notice(sweep: dict, grid: dict) -> list[str]:
-    """The block that replaces a single verdict when the bucket size chooses the verdict."""
+def sweep_notice(sweep: dict, grid: dict, verdict: str = "UNSTABLE") -> list[str]:
+    """The block that replaces a single verdict when the bucket size chooses the verdict.
+
+    Under --no-sweep the verdict is not replaced, so the block says that it was suppressed
+    and what it would have been. A flag that quietly turns an UNSTABLE into a PASS at exit
+    zero is worse than no flag.
+    """
     at = {v: [r["bucket"] for r in sweep["buckets"] if r["verdict"] == v]
           for v in sweep["verdicts"]}
     said = " and ".join(f"{v} at {', '.join(bs)}" for v, bs in at.items())
+    shared = (f"The verdict is not stable across bucket sizes. The same two files give "
+              f"{said}. The bucket size is a parameter you chose, so on this input choosing "
+              f"the bucket is choosing the answer, and no single one of these verdicts is "
+              f"the result.")
+    if sweep.get("applied", True):
+        head = shared + " This is the whole result."
+    else:
+        head = (f"UNSTABLE suppressed by --no-sweep. {shared} You passed --no-sweep, so the "
+                f"verdict above is {verdict} at the "
+                f"{fmt_bucket(grid['bucket_seconds'])} bucket you picked and the exit code "
+                f"matches that one. Without --no-sweep this run is UNSTABLE at exit 4. Read "
+                f"the verdict above as one row of the table below and not as the answer.")
     lines = [
-        f"The verdict is not stable across bucket sizes. The same two files give {said}. "
-        f"The bucket size is a parameter you chose, so on this input choosing the bucket is "
-        f"choosing the answer, and no single one of these verdicts is the result. This is "
-        f"the whole result.",
+        head,
         "",
         *sweep_table(sweep),
         "",
@@ -1481,22 +1680,95 @@ def dominant_incident_notice(res: dict) -> list[str]:
     return lines
 
 
-def scope_notice(scope: dict) -> str:
-    """The line that says the two files may not be describing the same system."""
-    unmatched = scope["alert_rows_on_unmatched_scopes"]
-    total = scope["alert_rows_with_a_scope"]
-    examples = ", ".join(f"`{s}`" for s in scope["alert_scopes_with_no_incident"][:5])
-    return (f"Scope mismatch. The alerts file names {_plural(scope['alert_scopes'], 'scope')} "
+def scope_counts_sentence(scope: dict) -> str:
+    """What each file named, and how much of it the two have in common."""
+    return (f"The alerts file names {_plural(scope['alert_scopes'], 'scope')} "
             f"in `{scope['alert_scope_column']}` and the incidents file names "
             f"{_plural(scope['incident_scopes'], 'scope')} in "
             f"`{scope['incident_scope_column']}`. They share "
-            f"{_plural(scope['shared_scopes'], 'scope')}. {unmatched} of {total} alert rows "
-            f"({unmatched / total * 100:.1f} percent) fall on a scope that appears in no "
-            f"incident, for example {examples}. Not one of those rows could have matched "
+            + ("no name at all." if not scope["shared_scopes"]
+               else f"{_plural(scope['shared_scopes'], 'scope')}."))
+
+
+def namespace_notice(scope: dict) -> list[str]:
+    """The block for an empty intersection where one side carries a single scope.
+
+    This is a naming difference, not a system mismatch, so it does not get the mismatch
+    wording and it does not get the filter remedy. Filtering to an empty intersection
+    leaves an empty file.
+    """
+    side = scope["single_scope_side"]
+    one = side[:-1]                              # "alert" or "incident"
+    name = scope["single_scope_name"]
+    column = scope["alert_scope_column"] if side == "alerts" else scope["incident_scope_column"]
+    flag = "--scope-col" if side == "alerts" else "--incident-scope-col"
+    unmatched = scope["alert_rows_on_unmatched_scopes"]
+    total = scope["alert_rows_with_a_scope"]
+    return [
+        f"Scope namespaces differ. {scope_counts_sentence(scope)} The whole `{side}` file "
+        f"sits on one scope, `{name}`, so the intersection is empty by construction and it "
+        f"will stay empty however the two exports are cut. {unmatched} of {total} alert "
+        f"rows ({unmatched / total * 100:.1f} percent) fall on a scope that appears in no "
+        f"incident, and that share would read the same on any pair of files shaped like "
+        f"this one. It is not evidence that the two files describe different systems.",
+        "",
+        f"A single distinct value in `{column}` is a routing destination, not a system. "
+        f"Both vendors legitimately call this field the service and they mean different "
+        f"things by it. A monitoring tool means the application the signal came from. An "
+        f"incident tracker means where the page was sent, and one catch-all destination for "
+        f"every page is a normal setup. So the two files here are most likely describing "
+        f"the same systems under two naming schemes.",
+        "",
+        f"Do not filter both exports to the scopes they share. There is nothing in the "
+        f"intersection, so that leaves an empty file. Take the {one} scope from "
+        f"something that carries the application name instead. The alert payload the "
+        f"{one} was created from usually holds it, and the {one} title often "
+        f"does too. Put that in a column, name it with {flag}, and run this again. Until "
+        f"then scope is unchecked in the way that matters, and every alert is still scored "
+        f"against every incident whatever system it came from.",
+    ]
+
+
+def empty_intersection_notice(scope: dict) -> str:
+    """The line for an empty intersection where both sides name several scopes."""
+    unmatched = scope["alert_rows_on_unmatched_scopes"]
+    total = scope["alert_rows_with_a_scope"]
+    examples = ", ".join(f"`{s}`" for s in scope["alert_scopes_with_no_incident"][:5])
+    return (f"Scope mismatch. {scope_counts_sentence(scope)} Not one name appears on both "
+            f"sides, so all {unmatched} of the {total} alert rows fall on a scope that "
+            f"appears in no incident, for example {examples}. Every one of them was scored "
+            f"as a false positive and none of them could have been anything else. The two "
+            f"files may be describing different systems, and if they are, precision, F1 and "
+            f"the verdict are all measuring that rather than the detector. Filtering both "
+            f"exports to the scopes they share is not a remedy here, because the "
+            f"intersection is empty and the filter leaves nothing. Read a few names off "
+            f"each side first. If the two vendors are naming the same systems differently, "
+            f"map one side onto the other, or take the scope from the alert payload or the "
+            f"incident title, and run this again.")
+
+
+def scope_notice(scope: dict) -> list[str]:
+    """What to say when most alert rows fall on a scope with no incident.
+
+    Three cases, and they want different things said. A genuine partial overlap keeps the
+    original wording and the filter remedy. An empty intersection loses the remedy, because
+    filtering to nothing leaves an empty file. An empty intersection with a single scope on
+    one side loses the mismatch reading too, because that shape is a naming difference.
+    """
+    if scope.get("namespace_mismatch"):
+        return namespace_notice(scope)
+    if scope.get("empty_intersection"):
+        return [empty_intersection_notice(scope)]
+    unmatched = scope["alert_rows_on_unmatched_scopes"]
+    total = scope["alert_rows_with_a_scope"]
+    examples = ", ".join(f"`{s}`" for s in scope["alert_scopes_with_no_incident"][:5])
+    return [f"Scope mismatch. {scope_counts_sentence(scope)} {unmatched} of {total} alert "
+            f"rows ({unmatched / total * 100:.1f} percent) fall on a scope that appears in "
+            f"no incident, for example {examples}. Not one of those rows could have matched "
             f"anything in the incident file, and every one of them was scored as a false "
             f"positive. The two files may be describing different systems, and if they are, "
             f"precision, F1 and the verdict are all measuring that rather than the "
-            f"detector. Filter both exports to the scopes they share and run this again.")
+            f"detector. Filter both exports to the scopes they share and run this again."]
 
 
 def render_report(r: dict) -> str:
@@ -1538,7 +1810,7 @@ def render_report(r: dict) -> str:
     # table of verdicts is the headline and the single-bucket answer below it is not.
     sweep = res.get("bucket_sweep")
     if sweep and sweep["unstable"]:
-        lines += sweep_notice(sweep, grid) + [""]
+        lines += sweep_notice(sweep, grid, r["verdict"]) + [""]
     elif sweep and sweep["comparable_buckets"] >= 2:
         lines += [stable_sweep_line(sweep, grid), ""]
 
@@ -1550,7 +1822,13 @@ def render_report(r: dict) -> str:
             lines += block + [""]
 
     if res.get("scope", {}).get("poor_overlap"):
-        lines += [scope_notice(res["scope"]), ""]
+        lines += scope_notice(res["scope"]) + [""]
+
+    if res.get("alerted_rate_ratio_high"):
+        lines += [alerted_rate_ratio_notice(res), ""]
+
+    if res.get("low_recall"):
+        lines += [low_recall_notice(res), ""]
 
     if res.get("near_floor"):
         lines += [near_floor_notice(res, grid), ""]
@@ -1610,8 +1888,11 @@ def render_report(r: dict) -> str:
         f"recall >= {RECALL_SATURATION} | "
         f"{status.get('sec8b_flag_everything', 'pass')} |",
         f"| Alerted rate against prevalence | 8b | alerted rate = "
-        f"{_fmt(deg['alerted_rate'])}, p = {_fmt(p, 4)} | alerted rate >= "
-        f"{ALERT_RATE_SATURATION} and >= {int(ALERT_RATE_MULTIPLE)} x p | "
+        f"{_fmt(deg['alerted_rate'])}, p = {_fmt(p, 4)}"
+        + (f", ratio = {res['alerted_rate_over_prevalence']:.1f}x"
+           if res.get("alerted_rate_over_prevalence") else "")
+        + f" | rate >= {ALERT_RATE_SATURATION} and >= {int(ALERT_RATE_MULTIPLE)} x p, "
+        f"or rate >= {ALERT_RATE_RATIO_FLOOR} and >= {int(ALERT_RATE_RATIO_MULTIPLE)} x p | "
         f"{status.get('alert_rate_far_above_prevalence', 'pass')} |",
         f"| Degenerate output guard | 8 | alerted rate = {_fmt(deg['alerted_rate'])}, "
         f"distinct scores = {deg['distinct_scores'] if deg['distinct_scores'] is not None else 'n/a'} | "

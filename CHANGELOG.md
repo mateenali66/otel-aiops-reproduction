@@ -2,7 +2,73 @@
 
 ## Unreleased
 
+### Changed
+- **The alerted-rate guard now has two ways in.** It was `rate >= 0.5 AND rate >= 4 x p`,
+  which reads as two conditions and behaves as one. Four times 0.125 is 0.5, so the multiple
+  is implied by the rate whenever prevalence is under 0.125, and real incident data is
+  essentially never above that. The guard was really just "alerts more than half the time"
+  and the ratio never bound on anything. Measured at a prevalence of 0.0397, a detector
+  alerting on 40 percent of a fourteen day timeline is alerting 10.1 times as often as
+  anything was wrong, and it passed at exit 0 with the best F1 in the table. A rate of 0.499
+  passed and 0.500 excluded, a step function with nothing else looking.
+
+  The old path is unchanged. A second path now fires at `rate >= 0.20 AND rate >= 10 x p`.
+  The floor of 0.20 is what protects the case the 0.5 floor was protecting, that a
+  rare-incident detector legitimately alerts many times more often than incidents occur. At
+  a prevalence of 0.001, alerting on 1 percent of the time is ten times prevalence and a
+  twentieth of the new floor, so it keeps its `PASS`. The multiple of 10 is the price of the
+  lower floor, and at full recall it means fewer than one alert in ten lands on an incident.
+  A perfect detector fails the multiple on both paths at every prevalence. The band between
+  the two paths is open on purpose. `ALERT_RATE_RATIO_FLOOR` and `ALERT_RATE_RATIO_MULTIPLE`
+  in `fdes/checks.py` set it, `check_result.json` records which path fired under
+  `alert_rate_path`, and the exclusion reason names the right floor. Applying it to the 120
+  archived folds changes no verdict, so `make verify`, `make verify-archive` and `make
+  pilot` are byte identical.
+- **`--no-sweep` no longer hides a verdict it suppressed.** It skipped the sweep, so a run
+  that would have been `UNSTABLE` at exit 4 came back as the single-bucket verdict at its
+  own exit code with nothing said. On one real export the same data at the same bucket gave
+  `UNSTABLE` at exit 4 with the sweep and `PASS` at exit 0 without it. The sweep now always
+  runs. The flag still holds the verdict and the exit code at the bucket you passed, and the
+  report says at the top that it suppressed an `UNSTABLE` and what the exit code would have
+  been. `check_result.json` carries `sweep_suppressed_unstable` and
+  `bucket_sweep.applied`.
+- **An empty scope intersection with one scope on one side is read as a naming difference.**
+  A second real run carried 31 scopes from Datadog's `service` tag, which are application
+  names, against exactly 1 from PagerDuty's `service` field, which was a catch-all routing
+  destination. Both vendors call the field `service` and mean different things by it, so the
+  intersection is empty by construction. The report used to call that a possible system
+  mismatch and tell the reader to filter both exports to the scopes they share, which leaves
+  an empty file. It now says the two files are using two naming schemes, does not offer the
+  filter remedy, and points at taking the incident scope from the alert payload or the
+  incident title. An empty intersection with several names on both sides keeps the mismatch
+  reading and loses only the unusable remedy. A genuine partial overlap is untouched.
+  `SCOPE_NAMESPACE_MAX_SCOPES` in `fdes/byod.py` sets the threshold, and `results.scope`
+  gains `empty_intersection`, `namespace_mismatch`, `single_scope_side` and
+  `single_scope_name`.
+
 ### Added
+- The alerted rate over prevalence, printed next to the verdict whenever it reaches four
+  times prevalence and neither path of the guard fired, with how many times more often the
+  detector alerted than anything was wrong, which floor or ratio kept the guard quiet, and
+  why that floor exists. The ratio also joins the check table. Across two independent real
+  datasets, twelve bucket sizes and two ground-truth variants the ratio ran from 11.7 to
+  14.7 while the guard never once fired, so the number that carried the information was the
+  one nothing printed. `check_result.json` carries `alerted_rate_over_prevalence` and
+  `alerted_rate_ratio_high`.
+- A thin-recall notice next to the verdict when a `PASS` sits on recall under 0.5. There is
+  deliberately no minimum recall in the procedure, and the README section "There is no
+  minimum recall" says why. One real run gave four instantaneous alerts over four days at
+  recall 0.071, F1 0.130 and lift 1.85, and passed at exit 0 having missed 93 percent of the
+  incident time. `LOW_RECALL_NOTICE` in `fdes/byod.py` sets the band and
+  `check_result.json` carries it as `low_recall`.
+- A README section, "Where the incident windows came from", on circular ground truth, plus a
+  line in every report's assumption list saying provenance was not checked. Building
+  incident windows by clustering the detector's own alerts gives near-perfect recall and a
+  high lift because every incident was defined by an alert, and nothing in the numbers shows
+  it.
+- A README known limit recording that both of the guard's absolute floors sit above where
+  the real detectors measured so far actually landed, so the ratio is doing the informing
+  and the floors are doing the excluding.
 - A README section on getting alert data out of a real vendor, which is the hardest part
   of using `check` and was undocumented. It covers Datadog Watchdog specifically: there is
   no monitor behind Watchdog and it is not in the Datadog MCP surface, its output is Events
@@ -49,6 +115,7 @@
   column list of every window file under `inputs`.
 
 ### Fixed
+- A doubled full stop in the mixed-timezone assumption line.
 - **Regression, zero-length windows are accepted again.** A row that starts and ends at
   the same second is an instantaneous event, not a broken row. A previous change refused
   the whole file, which rejected real vendor exports outright. A Datadog Watchdog story
