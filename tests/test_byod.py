@@ -442,39 +442,44 @@ class TestSchemaFromTheHeader(TempCase):
 
 
 class TestZeroLengthWindows(TempCase):
-    """A window that ends when it starts covers no time, the same as one that ends first."""
+    """A row that starts and ends at the same second is an instantaneous event.
 
-    def test_a_zero_length_window_is_refused(self):
-        with self.assertRaises(byod.InputError) as ctx:
-            self.alerts("2026-03-01T02:00:00Z,2026-03-01T02:00:00Z\n"
-                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
-        msg = str(ctx.exception)
-        self.assertIn("1 row(s) end at the same second they start", msg)
-        self.assertIn("'start'", msg)
-        self.assertIn("'end'", msg)
-        self.assertIn("start column only", msg)
+    Real vendor exports carry them. A Datadog Watchdog story that emitted a single event
+    has one timestamp, so start equals end. An earlier version refused the whole file,
+    which rejected a real export outright, and the only remedy it offered, dropping the
+    end column, would have turned every other row into a point event too.
 
-    def test_an_inverted_window_is_refused_the_same_way(self):
-        with self.assertRaises(byod.InputError) as ctx:
-            self.alerts("2026-03-01T03:00:00Z,2026-03-01T02:00:00Z\n")
-        msg = str(ctx.exception)
-        self.assertIn("1 row(s) end before they start", msg)
-        self.assertIn("'start'", msg)
-        self.assertIn("'end'", msg)
+    A row that ends BEFORE it starts is a different thing. That is impossible and means
+    the columns are wrong, so it is still refused.
+    """
 
-    def test_the_incidents_file_is_checked_too(self):
-        broken = write(self.tmp, "zero_incidents.csv",
-                       "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:00:00Z\n")
-        with self.assertRaises(byod.InputError) as ctx:
-            self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n", incidents=broken)
-        self.assertIn("zero_incidents.csv", str(ctx.exception))
+    MIXED = ("start,end\n"
+             "2026-03-01T02:00:00Z,2026-03-01T02:00:00Z\n"
+             "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
 
-    def test_point_events_are_not_read_as_zero_length_windows(self):
-        # A file with no end column has no end to disagree with, so it is not refused.
-        path = write(self.tmp, "points.csv", "start\n2026-03-01T02:00:00Z\n")
-        r = byod.check_alerts(path, self.incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
-        self.assertTrue(r["inputs"]["alerts"]["point_events"])
-        self.assertEqual(r["results"]["tp"], 1)
+    def mixed_alerts(self):
+        path = write(self.tmp, "mixed.csv", self.MIXED)
+        return byod.check_alerts(path, self.incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+
+    def test_a_zero_length_row_does_not_refuse_the_file(self):
+        result = self.mixed_alerts()
+        self.assertIn(result["verdict"], ("PASS", "EXCLUDE", "UNSTABLE", "INSUFFICIENT"))
+
+    def test_a_zero_length_row_marks_one_bucket(self):
+        r = self.mixed_alerts()["results"]
+        self.assertGreaterEqual(r["tp"] + r["fp"], 1)
+
+    def test_zero_length_rows_are_disclosed(self):
+        text = " ".join(byod.render_report(self.mixed_alerts()).splitlines())
+        self.assertIn("same second", text)
+        self.assertIn("not an error", text)
+
+    def test_a_row_that_ends_before_it_starts_is_still_refused(self):
+        path = write(self.tmp, "inverted.csv",
+                     "start,end\n2026-03-01T14:30:00Z,2026-03-01T02:00:00Z\n")
+        with self.assertRaises(byod.InputError) as cm:
+            byod.check_alerts(path, self.incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+        self.assertIn("end before they start", str(cm.exception))
 
 
 class TestAlertNothing(TempCase):

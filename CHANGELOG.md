@@ -49,6 +49,19 @@
   column list of every window file under `inputs`.
 
 ### Fixed
+- **Regression, zero-length windows are accepted again.** A row that starts and ends at
+  the same second is an instantaneous event, not a broken row. A previous change refused
+  the whole file, which rejected real vendor exports outright. A Datadog Watchdog story
+  that emitted a single event has one timestamp, so start equals end, and 9 of 157 rows
+  in one real export were like that. The only remedy offered was dropping the end column,
+  which would have turned the other 148 real windows into point events too.
+
+  These rows now mark the one bucket that contains them, which is what `mark_windows`
+  always did and still documents. They are reported in the assumptions so they are not
+  handled silently. A row that ends BEFORE it starts is unchanged and still refused,
+  because that is impossible rather than instantaneous.
+
+### Fixed
 - **Two forgotten tickets destroyed the result and the tool said nothing.** On a real
   PagerDuty export of 23 incidents over 35.6 days, two rows had been sitting open for 13
   days and 12 days and accounted for 601 of the 620 total incident-hours. The remaining 21
