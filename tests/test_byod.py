@@ -624,6 +624,89 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("usage error, not a verdict", p.stderr)
         self.assertNotEqual(p.returncode, VERDICT_EXIT_EXCLUDE)
 
+    def test_the_denominator_does_not_move_with_how_the_tracker_wrote_its_rows(self):
+        # Row count is a formatting property of an export, not a fact about the world. One
+        # outage is one row to one tracker, one row per affected service to another, and one
+        # row per status update to a third. The same two one-hour incidents written as forty
+        # three-minute rows moved alerts per incident from 355 to 17.75 and flipped the
+        # verdict, with prevalence, alerted rate, recall, precision, F1 and both duty cycles
+        # identical to the last decimal.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        whole = [(t0 + _dt.timedelta(days=8, hours=10), t0 + _dt.timedelta(days=8, hours=11)),
+                 (t0 + _dt.timedelta(days=20, hours=14), t0 + _dt.timedelta(days=20, hours=15))]
+        split = []
+        for st, _ in whole:
+            for k in range(20):
+                split.append((st + _dt.timedelta(minutes=3 * k),
+                              st + _dt.timedelta(minutes=3 * (k + 1))))
+        al, h = [], 0
+        while len(al) < 710:
+            base = t0 + _dt.timedelta(hours=h)
+            for k in range(3):
+                if len(al) >= 710:
+                    break
+                a = base + _dt.timedelta(minutes=5 + k * 15)
+                al.append((a, a + _dt.timedelta(seconds=72)))
+            h += 3
+        alerts = write(self.tmp, "fmt_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        seen = []
+        for name, inc in (("whole", whole), ("split", split)):
+            f_i = write(self.tmp, f"fmt_i_{name}.csv",
+                        "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+            r = byod.check_alerts(alerts, f_i, "5m", t_from=iso(t0), t_to=iso(end),
+                                  sweep=False)
+            seen.append((r["results"]["alerts_per_incident"], r["verdict"]))
+        self.assertEqual(seen[0], seen[1], "row count changed the answer")
+        self.assertEqual(len(whole), 2)
+        self.assertEqual(len(split), 40)
+
+    def test_pass_qualified_is_about_a_pass(self):
+        # It was set from the caveats alone with no reference to the verdict, so every
+        # EXCLUDE carried it and anyone reading the JSON instead of the exit code read an
+        # exclusion as a qualified pass.
+        excluded = self.abusive(1, rows=2000)
+        self.assertEqual(excluded["verdict"], "EXCLUDE")
+        self.assertFalse(excluded["pass_qualified"])
+        self.assertFalse(excluded["results"]["pass_qualified"])
+        qualified = self.oncall("1h")
+        self.assertEqual(qualified["verdict"], "PASS")
+        self.assertTrue(qualified["pass_qualified"])
+
+    def test_pass_qualified_sits_next_to_the_verdict(self):
+        # A script branching on the verdict needs the caveat in the same place. It was only
+        # nested under results, so result["pass_qualified"] returned None.
+        r = self.oncall("1h")
+        self.assertIn("pass_qualified", r)
+        self.assertEqual(r["pass_qualified"], r["results"]["pass_qualified"])
+
+    def test_the_volume_notice_gives_an_absolute_rate_and_does_not_call_windows_pages(self):
+        # A ratio alone cannot be compared against a shift, and someone who owns the pager
+        # will read a bucket-level precision as the fraction of useful pages, which it is not.
+        r = self.abusive(1, rows=600)
+        # A PASS at exit 5 rather than an exclusion. The guard does not fire at this rate,
+        # so volume is the only thing wrong and the notice is the only thing that says so.
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertTrue(r["pass_qualified"])
+        report = byod.render_report(r)
+        self.assertIn("a day, or about", report)
+        self.assertIn("An alert window is not a page", report)
+        self.assertIn("is measured per bucket and is not the fraction of pages", report)
+
+    def test_a_volume_close_to_the_limit_says_so(self):
+        # One real production stack landed at 49.47 against a limit of 50, missing it by
+        # about half an alert, and nothing in the report said the call was that close.
+        band = byod.NEAR_BAR_BAND
+        self.assertGreater(band, 0)
+        r = self.abusive(1, rows=int(6 * byod.ALERTS_PER_INCIDENT_LIMIT * 0.95))
+        res = r["results"]
+        if res["alerts_per_incident"] and not res["high_alert_volume"]:
+            self.assertTrue(res["alert_volume_near_limit"])
+            self.assertIn("for every incident there was to find", byod.render_report(r))
+
     def test_the_check_table_does_not_say_pass_when_the_guard_stood_down(self):
         # The prose said "was not applied" while the table one line below said "pass" for the
         # same check, and a skimmer reads the table.
