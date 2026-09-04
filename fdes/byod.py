@@ -76,6 +76,8 @@ OVERLAP_NOTICE = 0.10
 # verdict there turns on a rounding-level difference and it moves with the bucket size.
 NEAR_FLOOR_BAND = 0.20
 NEAR_BAR_BAND = 0.10    # an exclusion this close to the bar says so, see the reason text
+IMPLAUSIBLE_PREVALENCE = 0.50   # above this, most of the window was an incident. Say so loudly
+PREVALENCE_DRIFT_NOTICE = 2.0   # prevalence moving this much across the ladder gets named
 ZERO_LENGTH_DUTY_LIMIT = 0.20   # above this share of point events, duty cycle means nothing
 # Two gates on the quantisation suppression, and they close each other's holes. See
 # run_check for why neither is enough alone.
@@ -689,6 +691,70 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
     return float(int(a_touch.sum())) / float(incidents)
 
 
+def duplicate_rows(starts: np.ndarray, ends: np.ndarray) -> dict:
+    """Rows sharing an identical start and end. Usually a fan-out, not a detector firing.
+
+    A real Cloudflare export delivered every notification to four email recipients, so each
+    alert appeared four times with a distinct row identifier and an identical timestamp. That
+    quadrupled the alert count, quadrupled alerts per incident, and made the overlap notice
+    describe a distribution list as if it were a temporal property of the detector. The tool
+    noticed the rows were point events and did not notice they were quadruplicated.
+    """
+    out = {"rows": int(len(starts)), "distinct": int(len(starts)), "duplicate_rows": 0,
+           "max_multiplicity": 1, "looks_like_fan_out": False}
+    if not len(starts):
+        return out
+    pairs = np.stack([np.asarray(starts, dtype=np.int64),
+                      np.asarray(ends, dtype=np.int64)], axis=1)
+    _, counts = np.unique(pairs, axis=0, return_counts=True)
+    out["distinct"] = int(len(counts))
+    out["duplicate_rows"] = int(len(starts) - len(counts))
+    out["max_multiplicity"] = int(counts.max())
+    # A fan-out is regular. Every row repeated the same number of times, more than once.
+    out["looks_like_fan_out"] = bool(len(counts) > 1 and counts.min() == counts.max()
+                                     and counts.min() > 1)
+    return out
+
+
+def duplicate_notice(res: dict) -> str:
+    d = res["alert_duplicates"]
+    even = (f" Every distinct alert appears exactly {d['max_multiplicity']} times, which is "
+            f"the signature of a fan-out rather than of a detector repeating itself."
+            if d["looks_like_fan_out"] else "")
+    return (f"Duplicate alert rows. {d['rows']} alert rows carry only {d['distinct']} "
+            f"distinct start and end pairs, so {d['duplicate_rows']} of them are repeats of "
+            f"a row already counted.{even} The usual cause is delivery fan-out, one "
+            f"notification sent to several recipients or channels, each written as its own "
+            f"row with its own identifier. This tool cannot tell a fan-out from a detector "
+            f"that genuinely fired twice, so it counts every row.\n\n"
+            f"That matters for two numbers above. The alerted rate and the alerts per "
+            f"incident are both multiplied by it, and so is any overlap between alert "
+            f"windows, which will read as a temporal property of the detector when it is a "
+            f"property of your distribution list. Collapse the duplicates and run this "
+            f"again if the repeats are delivery rather than detection.")
+
+
+def implausible_prevalence_notice(res: dict, grid: dict) -> str:
+    """Most of the window was an incident. Say it at the top, and say what it disables."""
+    p = res["prevalence"]
+    bar = res.get("alert_rate_bar")
+    unreachable = res.get("alert_rate_bar_unreachable")
+    tail = ""
+    if unreachable:
+        tail = (f" It also silently disables the flag-everything guard. That guard fires "
+                f"when the alerted rate reaches {_fmt(bar, 3)}, and an alerted rate cannot "
+                f"exceed 1.0, so at this prevalence the check is incapable of failing. It "
+                f"is reported as not reachable rather than as passed, because a detector "
+                f"that alerts on most of the timeline would clear it here.")
+    return (f"Prevalence is {_fmt(p, 4)}, so {p * 100:.1f} percent of the observation window "
+            f"is inside an incident window. Read that before anything below it. It is "
+            f"occasionally true, on a range chosen around a long outage, and it much more "
+            f"often means the incident file is describing something other than incident "
+            f"time, such as ticket lifetime. Every number under it is measured against a "
+            f"predict-all floor computed from this prevalence, so if it is wrong, they all "
+            f"are.{tail}")
+
+
 def alert_volume_notice(res: dict) -> str:
     """Both the ratio and the absolute rate, because a ratio alone cannot be acted on.
 
@@ -708,7 +774,10 @@ def alert_volume_notice(res: dict) -> str:
     from_rows = (f", merged from the {raw} rows you supplied" if raw and inc and raw != inc
                  else "")
     return (f"Alerted {per:.0f} times for every incident there was to find, "
-            f"{windows} windows against {inc} separate incident stretches{from_rows}.{rate} "
+            f"{windows} alert windows divided by {inc} separate incident stretches"
+            f"{from_rows}.{rate} That division is the whole calculation, and the {inc} is "
+            f"counted on raw incident times rather than on buckets, so it will not always "
+            f"match the stretch count reported in the coverage section. "
             f"Nothing "
             f"above measures that. The flag-everything guard reads how much of the timeline "
             f"the detector occupies, and a detector that pages constantly in short bursts "
@@ -975,6 +1044,11 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
             "f1_score": computed["f1_score"],
             "f1_predict_all": computed["f1_predict_all"],
             "f1_over_floor": computed["f1_over_floor"],
+            "alert_rate_bar": computed.get("alert_rate_bar"),
+            # Which check actually decided this row. Without it the table shows lift passing
+            # at every bucket next to verdicts that flip, and a reader is left to infer a
+            # mechanism the prose then asserts for them, wrongly.
+            "decided_by": ([k for k, v in computed["checks"].items() if v] or ["nothing"])[0],
             "verdict": computed["verdict"],
         })
     decided = [r["verdict"] for r in rows if r["verdict"] in ("PASS", "EXCLUDE")]
@@ -1444,8 +1518,17 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         # "pass" would be a lie when the guard reached the rate and was told to stand down
         # because the rate is a bucketing artefact. The prose says "was not applied" and a
         # reader who skims the table has to be told the same thing.
-        "alert_rate_far_above_prevalence": ("not applied, see the notice above" if quantised
-                                            else check_state(saturated, evaluable)),
+        # Two ways this must not say "pass". The guard can be told to stand down because the
+        # rate is a bucketing artefact. And above a prevalence of 0.5 the bar is
+        # sqrt(2p) > 1, which no alerted rate can reach, so the check is structurally
+        # incapable of firing. The docstring proved the safe direction, that a perfect
+        # detector can never be caught. Nobody wrote down the dual. On a real export at a
+        # prevalence of 0.853 the table printed a bar of 1.306 next to the word pass, for a
+        # check that could not have failed.
+        "alert_rate_far_above_prevalence": (
+            "not applied, see the notice above" if quantised
+            else "not reachable at this prevalence" if (rate_bar is not None and rate_bar > 1.0)
+            else check_state(saturated, evaluable)),
         "degenerate_output": check_state(deg["degenerate"], evaluable),
     }
     computed["exclusion_reasons"] = reasons
@@ -1474,7 +1557,15 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         evaluable and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
     computed["alerted_rate_ratio_notice"] = bool(
         computed["alerted_rate_ratio_high"] and not saturated and not quantised)
+    computed["alerted_rate"] = round(alert_rate, 6)
     computed["alert_rate_bar"] = round(rate_bar, 4) if rate_bar is not None else None
+    computed["alert_rate_bar_unreachable"] = bool(rate_bar is not None and rate_bar > 1.0)
+    # A prevalence above a half says most of the observation window was an incident. That is
+    # occasionally true and usually means the incident file is wrong. It also silently
+    # disables the flag-everything guard, so it has to be said at the top rather than left
+    # for a reader to work out from a bar above 1.
+    computed["implausible_prevalence"] = bool(
+        both_classes and prevalence > IMPLAUSIBLE_PREVALENCE)
     computed["alert_duty_cycle"] = round(alert_duty, 6) if alert_duty is not None else None
     computed["incident_duty_cycle"] = round(truth_duty, 6) if truth_duty is not None else None
     computed["alert_rate_quantised"] = quantised
@@ -1570,6 +1661,7 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       / max(1e-9, float(grid["span_seconds"]) / 86400.0),
                                       stretches=merged_stretches(grid, i_start, i_end))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
+    computed["alert_duplicates"] = duplicate_rows(a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
         grid, i_start, i_end, computed["incident_concentration"]["long_row_indices"])
@@ -1911,7 +2003,9 @@ def near_floor_notice(res: dict, grid: dict) -> str:
                        f"{', '.join(others)}, and trust the verdict only if they agree.")
     if sweep["unstable"] and sweep.get("applied", True):
         return head + ("The bucket sweep above re-ran this input at other --bucket values "
-                       "and they do not agree, which is why the verdict is UNSTABLE.")
+                       "and they do not agree, so the verdict is UNSTABLE. That does not "
+                       "mean the floor is what moved it. Read the Decided by column in the "
+                       "sweep table for the check that actually produced each verdict.")
     if sweep["unstable"]:
         return head + ("The bucket sweep above re-ran this input at other --bucket values "
                        "and they do not agree. Without --no-sweep the verdict would be "
@@ -2006,18 +2100,20 @@ def low_recall_notice(res: dict) -> str:
 
 def sweep_table(sweep: dict) -> list[str]:
     """The verdict at every bucket size, as a table."""
-    lines = ["| Bucket | Buckets | Prevalence | Alerted rate | Recall | F1 | Floor | "
-             "F1 / floor | Verdict |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| Bucket | Buckets | Prevalence | Alerted rate | Guard bar | Recall | F1 | "
+             "Floor | F1 / floor | Decided by | Verdict |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sweep["buckets"]:
         mark = " (yours)" if r["is_selected"] else ""
         lines.append(
             f"| {r['bucket']}{mark} | {r['n_buckets']} | {_fmt(r['prevalence'], 4)} | "
-            f"{_fmt(r['alerted_rate'], 3)} | {_fmt(r['recall'], 3)} | "
+            f"{_fmt(r['alerted_rate'], 3)} | {_fmt(r.get('alert_rate_bar'), 3)} | "
+            f"{_fmt(r['recall'], 3)} | "
             f"{_fmt(r['f1_score'], 3)} | {_fmt(r['f1_predict_all'], 3)} | "
-            f"{_fmt(r['f1_over_floor'], 2)} | {r['verdict']} |")
+            f"{_fmt(r['f1_over_floor'], 2)} | {r.get('decided_by', 'nothing')} | "
+            f"{r['verdict']} |")
     for s in sweep["skipped"]:
-        lines.append(f"| {s['bucket']} | not run | | | | | | | see below |")
+        lines.append(f"| {s['bucket']} | not run | | | | | | | | | see below |")
     return lines
 
 
@@ -2049,11 +2145,27 @@ def sweep_notice(sweep: dict, grid: dict, verdict: str = "UNSTABLE") -> list[str
         "",
         *sweep_table(sweep),
         "",
-        "A coarse bucket lets one short alert cover a whole bucket of incident time for "
-        "free, so recall rises with the bucket size while precision is barely charged for "
-        "it. That mechanism moves the verdict on its own, without the detector getting any "
-        "better.",
+        "The Decided by column names the check that produced each verdict, so read the "
+        "cause there rather than inferring it. Two different mechanisms can move a verdict "
+        "across this ladder and they leave different traces. A coarse bucket lets one short "
+        "alert cover a whole bucket of incident time for free, which raises recall and the "
+        "lift while precision is barely charged. Separately, a coarse bucket raises "
+        "prevalence, which raises both the predict-all floor and the flag-everything bar, "
+        "so a run can flip on the alerted rate alone while its lift passes at every bucket. "
+        "That second case is real and was measured on a production export, where the lift "
+        "cleared the floor at all four buckets and every flip came from the alerted rate "
+        "crossing the bar.",
     ]
+    prevs = [r["prevalence"] for r in sweep["buckets"] if r["prevalence"]]
+    if prevs and max(prevs) >= min(prevs) * PREVALENCE_DRIFT_NOTICE:
+        lines.append(
+            f"Prevalence itself moves across this ladder, from {_fmt(min(prevs), 4)} to "
+            f"{_fmt(max(prevs), 4)}, a factor of {max(prevs) / min(prevs):.1f}. A coarse "
+            f"bucket counts a whole bucket as anomalous when any part of it was, so "
+            f"prevalence rises with the bucket size on the same data. Both the predict-all "
+            f"floor and the flag-everything bar are computed from prevalence, so the "
+            f"reference the verdict is measured against is moving down this table as well "
+            f"as the detector's numbers.")
     if sweep["lift_rises_with_bucket_size"]:
         lines.append(
             "The lift rises with every step of the ladder here, which is the signature of "
@@ -2310,6 +2422,12 @@ def render_report(r: dict) -> str:
         block = dominant_incident_notice(res)
         if block:
             lines += block + [""]
+
+    if res.get("alert_duplicates", {}).get("duplicate_rows"):
+        lines += [duplicate_notice(res), ""]
+
+    if res.get("implausible_prevalence"):
+        lines += [implausible_prevalence_notice(res, grid), ""]
 
     if res.get("high_alert_volume") or res.get("alert_volume_near_limit"):
         lines += [alert_volume_notice(res), ""]

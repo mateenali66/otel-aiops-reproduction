@@ -624,6 +624,124 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("usage error, not a verdict", p.stderr)
         self.assertNotEqual(p.returncode, VERDICT_EXIT_EXCLUDE)
 
+    def test_the_guard_is_not_reported_as_passed_when_it_cannot_fire(self):
+        # The bar is the square root of twice prevalence, so above a prevalence of 0.5 it
+        # exceeds 1.0 and no alerted rate can reach it. A real export at 0.853 printed a bar
+        # of 1.306 next to the word pass, for a check that was incapable of failing. The
+        # docstring proved the safe direction, that a perfect detector can never be caught,
+        # and nobody wrote down the dual.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        incidents = write(self.tmp, "long_i.csv",
+                          f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(days=25))}\n")
+        al = [(t0 + _dt.timedelta(hours=6 * k), t0 + _dt.timedelta(hours=6 * k, minutes=30))
+              for k in range(20)]
+        alerts = write(self.tmp, "long_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        r = byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                              sweep=False)
+        res = r["results"]
+        self.assertGreater(res["prevalence"], 0.5)
+        self.assertGreater(res["alert_rate_bar"], 1.0)
+        self.assertTrue(res["alert_rate_bar_unreachable"])
+        row = [l for l in byod.render_report(r).splitlines()
+               if l.startswith("| Alerted rate against prevalence")][0]
+        self.assertIn("not reachable at this prevalence", row)
+        self.assertNotIn("| pass |", row)
+
+    def test_a_prevalence_above_a_half_is_named_at_the_top(self):
+        # It means most of the observation window was an incident, which usually means the
+        # incident file is describing ticket lifetime rather than incident time.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        incidents = write(self.tmp, "long_i2.csv",
+                          f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(days=25))}\n")
+        alerts = write(self.tmp, "long_a2.csv",
+                       f"start,end\n{iso(t0)},{iso(t0 + _dt.timedelta(hours=1))}\n")
+        r = byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                              sweep=False)
+        self.assertTrue(r["results"]["implausible_prevalence"])
+        report = byod.render_report(r)
+        self.assertIn("percent of the observation window is inside an incident window",
+                      report)
+        self.assertIn("if it is wrong, they all are", report)
+        self.assertIn("silently disables the flag-everything guard", report)
+
+    def test_fan_out_duplicates_are_named_rather_than_counted_silently(self):
+        # A real export delivered every notification to four email recipients, so each alert
+        # appeared four times with a distinct row identifier and an identical timestamp. That
+        # multiplied the alerted rate and alerts per incident by four, and made the overlap
+        # notice describe a distribution list as a temporal property of the detector.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        rows = []
+        for k in range(10):
+            st = t0 + _dt.timedelta(hours=2 * k)
+            for _ in range(4):
+                rows.append((st, st + _dt.timedelta(minutes=5)))
+        alerts = write(self.tmp, "fan_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in rows))
+        r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              sweep=False)
+        d = r["results"]["alert_duplicates"]
+        self.assertEqual(d["rows"], 40)
+        self.assertEqual(d["distinct"], 10)
+        self.assertEqual(d["max_multiplicity"], 4)
+        self.assertTrue(d["looks_like_fan_out"])
+        report = byod.render_report(r)
+        self.assertIn("Duplicate alert rows", report)
+        self.assertIn("signature of a fan-out", report)
+        self.assertIn("property of your distribution list", report)
+
+    def test_a_clean_export_gets_no_duplicate_notice(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T06:00:00Z,2026-03-01T07:00:00Z\n", sweep=False)
+        self.assertEqual(r["results"]["alert_duplicates"]["duplicate_rows"], 0)
+        self.assertNotIn("Duplicate alert rows", byod.render_report(r))
+
+    def test_the_sweep_names_the_check_that_decided_each_row(self):
+        # The prose asserted one mechanism unconditionally. On a real export the lift cleared
+        # the floor at every bucket and every flip came from the alerted-rate guard, so the
+        # stated cause was confidently wrong while the verdict was right.
+        r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        report = byod.render_report(r)
+        self.assertIn("| Decided by |", report)
+        self.assertIn("The Decided by column names the check that produced each verdict",
+                      report)
+        self.assertNotIn("That mechanism moves the verdict on its own", report)
+        for row in r["results"]["bucket_sweep"]["buckets"]:
+            self.assertIn("decided_by", row)
+
+    def test_the_exit_code_is_written_into_the_result_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(INCIDENTS)
+            (d / "alerts.csv").write_text("start,end\n"
+                                          "2026-03-01T00:00:00Z,2026-03-01T23:59:00Z\n")
+            p = subprocess.run(
+                [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check",
+                 "--alerts", str(d / "alerts.csv"), "--incidents", str(d / "incidents.csv"),
+                 "--bucket", "60s", "--from", DAY_FROM, "--to", DAY_TO,
+                 "--no-sweep", "--out", str(d / "out")],
+                cwd=ROOT, capture_output=True, text=True)
+            saved = json.loads((d / "out" / "alerts" / "check_result.json").read_text())
+            self.assertEqual(saved["exit_code"], p.returncode)
+
+    def test_the_help_documents_every_exit_code_the_tool_can_return(self):
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--help"],
+            cwd=ROOT, capture_output=True, text=True)
+        flat = " ".join(p.stdout.split())
+        for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 "):
+            self.assertIn(code, flat)
+        self.assertIn("PASS, but something was held back", flat)
+
     def test_the_denominator_does_not_move_with_the_bucket_you_picked(self):
         # The first version of the merge used the bucket size as its gap tolerance, on the
         # reasoning that the caller had already chosen that number. That made a count of
@@ -1830,8 +1948,13 @@ class TestBucketSweep(TempCase):
     def test_the_near_floor_notice_defers_to_the_sweep(self):
         # The near-floor notice used to ask the reader to re-run at other buckets. The
         # sweep has already done that, so it points at the answer instead of asking again.
-        self.assertIn("which is why the verdict is UNSTABLE",
-                      byod.render_report(self.unstable()))
+        # The old wording said the disagreement "is why the verdict is UNSTABLE", which
+        # reads as a claim that the floor moved it. On a real export every bucket cleared
+        # the lift and every flip came from the alerted-rate guard, so the sentence now
+        # states the fact and points at the column that names the actual cause.
+        report = byod.render_report(self.unstable())
+        self.assertIn("so the verdict is UNSTABLE", report)
+        self.assertIn("Read the Decided by column", report)
         near = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:00:00Z\n"
                            "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
         self.assertTrue(near["results"]["near_floor"])
