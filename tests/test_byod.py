@@ -420,6 +420,80 @@ class TestAlertRateCurve(TempCase):
         self.assertNotIn("excluded on alert volume", report)
         self.assertIn("scores about what flagging every bucket would score", report)
 
+    def oncall(self, bucket: str):
+        """Six one-hour incidents caught in full, plus six one-minute false alarms a day.
+
+        The detector is in an alerting state 1.25 percent of the time against a prevalence
+        of 0.83 percent, so it alerts 1.5 times as often as anything is wrong. At an hourly
+        bucket every one-minute alarm claims a whole bucket and the alerted rate reads 0.25.
+        """
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = [(t0 + _dt.timedelta(days=5 * k, hours=10),
+                t0 + _dt.timedelta(days=5 * k, hours=11)) for k in range(6)]
+        al = list(inc)
+        for day in range(30):
+            for j in range(6):
+                st = t0 + _dt.timedelta(days=day, hours=2 + j * 2)
+                al.append((st, st + _dt.timedelta(minutes=1)))
+        incidents = write(self.tmp, "oncall_incidents.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "oncall_alerts.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        return byod.check_alerts(alerts, incidents, bucket, t_from=iso(t0), t_to=iso(end),
+                                 sweep=False)
+
+    def test_a_coarse_bucket_does_not_condemn_a_detector_that_alerts_briefly(self):
+        # The guard reads bucket occupancy. A window shorter than the bucket claims the
+        # whole bucket, so at a coarse bucket a detector that alerts briefly and often reads
+        # exactly like one that alerts continuously. This detector was excluded at the hourly
+        # bucket with a report saying it alerted 30 times as often as anything was wrong,
+        # when it alerts 1.5 times as often. The rate was the bucket, not the detector.
+        for bucket in ("1m", "5m", "15m", "1h"):
+            r = self.oncall(bucket)
+            res = r["results"]
+            self.assertEqual(r["verdict"], "PASS", bucket)
+            self.assertAlmostEqual(res["alert_duty_cycle"], 0.0124, places=3)
+        # Only the hourly bucket inflates the rate past the bar, so only it is suppressed.
+        self.assertTrue(self.oncall("1h")["results"]["alert_rate_quantised"])
+        self.assertFalse(self.oncall("1m")["results"]["alert_rate_quantised"])
+
+    def test_the_quantisation_notice_gives_the_duty_cycle_and_the_alert_count(self):
+        r = self.oncall("1h")
+        report = byod.render_report(r)
+        self.assertIn("Alerted rate inflated by the bucket size", report)
+        self.assertIn("1.24 percent of the time", report)
+        self.assertIn("1.5 times as often as anything was wrong", report)
+        # The count of alerts is a different question from the time they occupy, and this
+        # detector pages 186 times in 30 days. The notice must not hide that.
+        self.assertIn("186 alert windows", report)
+        # And it must not be followed by the ordinary ratio notice saying the opposite.
+        self.assertNotIn("over the 4 times this package treats as worth a second look",
+                         report)
+
+    def test_a_genuinely_saturated_detector_is_still_excluded_at_every_bucket(self):
+        # The suppression must not become a way out for a detector that really does alert
+        # continuously. Long windows, so bucketing changes nothing.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = [(t0 + _dt.timedelta(days=k), t0 + _dt.timedelta(days=k, hours=1))
+               for k in range(6)]
+        al = [(t0 + _dt.timedelta(days=k), t0 + _dt.timedelta(days=k, hours=22))
+              for k in range(30)]
+        incidents = write(self.tmp, "sat_incidents.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "sat_alerts.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        for bucket in ("1m", "1h"):
+            r = byod.check_alerts(alerts, incidents, bucket, t_from=iso(t0), t_to=iso(end),
+                                  sweep=False)
+            self.assertEqual(r["verdict"], "EXCLUDE", bucket)
+            self.assertFalse(r["results"]["alert_rate_quantised"], bucket)
+
     def test_the_step_at_the_old_floor_is_gone(self):
         # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
         for buckets in (719, 720):

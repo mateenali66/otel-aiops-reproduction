@@ -75,6 +75,7 @@ OVERLAP_NOTICE = 0.10
 # A lift this close to 1.0 either way gets its own line near the top of the report. The
 # verdict there turns on a rounding-level difference and it moves with the bucket size.
 NEAR_FLOOR_BAND = 0.20
+NEAR_BAR_BAND = 0.10    # an exclusion this close to the bar says so, see the reason text
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
@@ -436,6 +437,43 @@ def build_grid(t_from: int, t_to: int, bucket_s: int) -> dict:
     return {"t_from": int(t_from), "t_to": int(t_to), "bucket_seconds": int(bucket_s),
             "n_buckets": n, "from_iso": iso(t_from), "to_iso": iso(t_to),
             "span_seconds": int(span)}
+
+
+def duty_cycle(grid: dict, starts: np.ndarray, ends: np.ndarray) -> float | None:
+    """The fraction of the range these windows actually cover, with no bucket involved.
+
+    The alerted rate this tool reports is bucket occupancy. A window shorter than the bucket
+    claims the whole bucket, so at a coarse bucket a detector that alerts briefly and often
+    reads exactly like one that alerts continuously. The duty cycle is the same quantity with
+    the bucket taken out, and comparing the two is the only way to tell those apart.
+
+    Overlapping windows are unioned, so a detector is not charged twice for alerting twice
+    about the same minute. Windows are clipped to the range first.
+    """
+    lo, hi = int(grid["t_from"]), int(grid["t_to"])
+    span = hi - lo
+    if span <= 0 or not len(starts):
+        return None
+    a = np.clip(np.asarray(starts, dtype=np.int64), lo, hi)
+    b = np.clip(np.asarray(ends, dtype=np.int64), lo, hi)
+    keep = b > a
+    a, b = a[keep], b[keep]
+    if not len(a):
+        # Every window is instantaneous. That is a real shape, and its duty cycle is zero
+        # rather than unknown, but zero would make every comparison below trivially true,
+        # so it is reported as not measurable instead.
+        return None
+    order = np.argsort(a, kind="stable")
+    a, b = a[order], b[order]
+    total, cur_a, cur_b = 0, a[0], b[0]
+    for x, y_ in zip(a[1:], b[1:]):
+        if x <= cur_b:
+            cur_b = max(cur_b, y_)
+        else:
+            total += cur_b - cur_a
+            cur_a, cur_b = x, y_
+    total += cur_b - cur_a
+    return float(total) / float(span)
 
 
 def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -906,7 +944,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
               scores: np.ndarray | None, contiguous: bool = True,
               truth_rows: int | None = None, truth_coverage: dict | None = None,
               alert_rows: int | None = None,
-              alert_coverage: dict | None = None) -> tuple[dict, list[dict]]:
+              alert_coverage: dict | None = None,
+              alert_duty: float | None = None,
+              truth_duty: float | None = None) -> tuple[dict, list[dict]]:
     """Apply the FDES checks to one bucketed timeline.
 
     Returns the computed values and the list of things that were not computable, each with
@@ -1023,6 +1063,24 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # display, and at a low prevalence that rounding moves the ratio by a whole percent.
     alert_rate = float(pred.mean()) if n else 0.0
     saturated = bool(both_classes and alert_rate_saturated(alert_rate, prevalence))
+    # The alerted rate is bucket occupancy, and at a coarse bucket that is not the same
+    # quantity the guard thinks it is reading. A detector catching six one-hour incidents in
+    # full, plus six one-minute false alarms a day, is in an alerting state 1.25 percent of
+    # the time against a prevalence of 0.83 percent, so it alerts 1.5 times as often as
+    # anything is wrong. At an hourly bucket every one-minute alarm claims a whole bucket,
+    # the alerted rate reads 0.25, and the guard excluded it while saying it alerted 30
+    # times as often as anything was wrong. That sentence was false, and it was the most
+    # confident sentence in the report.
+    #
+    # The test is the guard's own rule applied to the raw durations, which no bucket has
+    # touched. If it does not fire there, the exclusion belongs to the bucket size the user
+    # picked rather than to the detector, and this procedure will not exclude on that.
+    quantised = bool(saturated
+                     and alert_duty is not None and truth_duty is not None
+                     and truth_duty > 0.0
+                     and not alert_rate_saturated(alert_duty, truth_duty))
+    if quantised:
+        saturated = False
     # The bar the detector had to stay under, so the report can print it rather than only
     # say whether it was cleared.
     rate_bar = alert_rate_bar(prevalence) if both_classes else None
@@ -1086,6 +1144,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                 f"an incident window. That is {alert_rate / prevalence:.0f} times as often "
                 f"as anything was wrong. At this prevalence the guard fires at an alerted "
                 f"rate of {rate_bar:.3f}, and {alert_rate:.3f} reaches it"
+                + (f", by {(alert_rate / rate_bar - 1.0) * 100:.1f} percent, which is close "
+                   f"enough to the bar that a small change in either file could move it"
+                   if rate_bar and alert_rate < rate_bar * (1.0 + NEAR_BAR_BAND) else "")
                 + counterweight)
         if no_lift and not sec8b:
             reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
@@ -1124,9 +1185,17 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     ratio = round(alert_rate / prevalence, 2) if both_classes and prevalence > 0 else None
     computed["alerted_rate_over_prevalence"] = ratio
     computed["alerted_rate_ratio_notice_multiple"] = RATIO_NOTICE_MULTIPLE
+    # When the rate is a bucketing artefact the quantisation notice above already gives the
+    # ratio and says why it cannot be read at face value. Printing the ordinary ratio notice
+    # underneath it would state the opposite about the same number.
     computed["alerted_rate_ratio_high"] = bool(
-        evaluable and not saturated and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
+        evaluable and not saturated and not quantised
+        and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
     computed["alert_rate_bar"] = round(rate_bar, 4) if rate_bar is not None else None
+    computed["alert_duty_cycle"] = round(alert_duty, 6) if alert_duty is not None else None
+    computed["incident_duty_cycle"] = round(truth_duty, 6) if truth_duty is not None else None
+    computed["alert_rate_quantised"] = quantised
+    computed["alert_windows"] = alert_rows
     # Kept for anything reading the v1.2.0 field. There is one rule now, so it is either
     # the curve or nothing.
     computed["alert_rate_path"] = "curve" if saturated else None
@@ -1181,7 +1250,9 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
 
     computed, not_computed = run_check(mode="alerts", y=truth, pred=alerted, scores=None,
                                       truth_rows=i_note["rows"], truth_coverage=i_span,
-                                      alert_rows=a_note["rows"], alert_coverage=a_span)
+                                      alert_rows=a_note["rows"], alert_coverage=a_span,
+                                      alert_duty=duty_cycle(grid, a_start, a_end),
+                                      truth_duty=duty_cycle(grid, i_start, i_end))
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
         grid, i_start, i_end, computed["incident_concentration"]["long_row_indices"])
@@ -1525,6 +1596,36 @@ def near_floor_notice(res: dict, grid: dict) -> str:
                    f"though the margin is thin. The table is below.")
 
 
+def quantisation_notice(res: dict, grid: dict) -> str:
+    """The alerted rate is inflated by the bucket, and the guard was told to stand down.
+
+    Printed only when the guard would have fired on the bucketed rate and does not fire on
+    the raw durations. That gap is the bucket, not the detector.
+    """
+    deg = res["degenerate_output"]
+    rate, duty = deg["alerted_rate"], res["alert_duty_cycle"]
+    bar, p = res["alert_rate_bar"], res["prevalence"]
+    true_ratio = (duty / res["incident_duty_cycle"]) if res.get("incident_duty_cycle") else None
+    return (
+        f"Alerted rate inflated by the bucket size, so the flag-everything guard did not "
+        f"act on it. At the {fmt_bucket(grid['bucket_seconds'])} bucket this detector "
+        f"occupies {rate * 100:.1f} percent of the buckets, which is over the "
+        f"{bar:.3f} the guard fires at for a prevalence of {_fmt(p, 4)}. Measured on the "
+        f"raw alert windows, with no bucket involved, it is in an alerting state "
+        f"{duty * 100:.2f} percent of the time"
+        + (f", which is {true_ratio:.1f} times as often as anything was wrong"
+           if true_ratio is not None else "")
+        + f". An alert shorter than the bucket claims the whole bucket, so a detector that "
+        f"alerts briefly and often reads here exactly like one that alerts continuously. "
+        f"Those are different things and only one of them is what this guard exists to "
+        f"catch, so it was not applied. Re-run at a bucket close to your shortest alert to "
+        f"see the rate the detector actually produces. Note that the count of alerts is a "
+        f"separate question from the time they occupy: this run has "
+        f"{res.get('alert_windows') or 'several'} alert windows at a precision of "
+        f"{_fmt(res['precision'], 3)}, and whether that many pages is acceptable is a "
+        f"judgement about your on-call load rather than something this check settles.")
+
+
 def alerted_rate_ratio_notice(res: dict) -> str:
     """The line that says the detector alerted far more often than anything was wrong.
 
@@ -1848,6 +1949,9 @@ def render_report(r: dict) -> str:
 
     if res.get("scope", {}).get("poor_overlap"):
         lines += scope_notice(res["scope"]) + [""]
+
+    if res.get("alert_rate_quantised"):
+        lines += [quantisation_notice(res, grid), ""]
 
     if res.get("alerted_rate_ratio_high"):
         lines += [alerted_rate_ratio_notice(res), ""]
