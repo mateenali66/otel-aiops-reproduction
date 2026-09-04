@@ -10,6 +10,8 @@ Subcommands
   verify-archive  recompute the archived tables from the archived raw scores (FDES section 9)
   estimate        print the runtime estimate without running anything
   pilot           evaluate your own detector under the FDES v1.0.0-draft procedure
+  check           run the FDES checks against your own alert or score CSVs; no Zenodo
+                  artifact and no detector plugin needed
 
 Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
 sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
@@ -477,6 +479,39 @@ def cmd_pilot(args) -> None:
     sys.exit(0 if r["verdict"] == "PASS" else 2)
 
 
+# --------------------------------------------------------------------------- check
+
+def cmd_check(args) -> None:
+    """Run the FDES checks against the user's own CSVs. No Zenodo artifact is needed."""
+    from fdes import byod
+
+    if bool(args.alerts) == bool(args.scores):
+        sys.exit("pass exactly one of --alerts (alert windows) or --scores (a score series)")
+
+    try:
+        if args.alerts:
+            result = byod.check_alerts(
+                args.alerts, args.incidents, args.bucket or "60s",
+                t_from=args.range_from, t_to=args.range_to, infer_range=args.infer_range,
+                start_col=args.start_col, end_col=args.end_col)
+            label = args.label or Path(args.alerts).stem
+        else:
+            result = byod.check_scores(
+                args.scores, args.incidents, args.bucket,
+                t_from=args.range_from, t_to=args.range_to, infer_range=args.infer_range,
+                threshold=args.threshold, aggregate=args.aggregate,
+                timestamp_col=args.timestamp_col, score_col=args.score_col,
+                start_col=args.start_col, end_col=args.end_col)
+            label = args.label or Path(args.scores).stem
+    except byod.InputError as exc:
+        sys.exit(f"input problem: {exc}")
+
+    out = byod.write_outputs(result, Path(args.out) / label)
+    log((out / "check_report.md").read_text())
+    log(f"written: {out}/check_result.json, check_report.md")
+    sys.exit(0 if result["verdict"] == "PASS" else 2)
+
+
 # --------------------------------------------------------------------------- main
 
 def main() -> None:
@@ -510,6 +545,38 @@ def main() -> None:
     s.add_argument("--features", default=None, help="your own feature parquet (see README schema)")
     s.add_argument("--out", default=str(OUT_DIR / "pilot"))
     s.set_defaults(fn=cmd_pilot)
+
+    s = sub.add_parser("check", help="FDES checks on your own alert or score CSVs")
+    s.add_argument("--alerts", default=None,
+                   help="CSV of alert windows (start and end columns). Alerts mode.")
+    s.add_argument("--scores", default=None,
+                   help="CSV with a timestamp column and a score column. Scores mode.")
+    s.add_argument("--incidents", required=True,
+                   help="CSV of ground-truth incident windows (start and end columns)")
+    s.add_argument("--bucket", default=None,
+                   help="bucket size, for example 60s, 5m or 1h. Defaults to 60s in "
+                        "alerts mode. In scores mode it defaults to the median spacing of "
+                        "your timestamps.")
+    s.add_argument("--from", dest="range_from", default=None,
+                   help="start of the observation window, ISO 8601 or epoch seconds")
+    s.add_argument("--to", dest="range_to", default=None,
+                   help="end of the observation window, ISO 8601 or epoch seconds")
+    s.add_argument("--infer-range", action="store_true",
+                   help="use the span of the input instead of --from and --to. This drops "
+                        "quiet time outside the events, which inflates prevalence.")
+    s.add_argument("--threshold", type=float, default=None,
+                   help="in scores mode, the operating point your monitor uses. Without "
+                        "it the threshold is tuned in sample to maximise F1, which is "
+                        "optimistic.")
+    s.add_argument("--aggregate", default="max", choices=["max", "mean"],
+                   help="in scores mode, how to reduce several scores inside one bucket")
+    s.add_argument("--timestamp-col", default=None, help="override the timestamp column name")
+    s.add_argument("--score-col", default=None, help="override the score column name")
+    s.add_argument("--start-col", default=None, help="override the window start column name")
+    s.add_argument("--end-col", default=None, help="override the window end column name")
+    s.add_argument("--label", default=None, help="subdirectory name under --out")
+    s.add_argument("--out", default=str(OUT_DIR / "check"))
+    s.set_defaults(fn=cmd_check)
 
     args = p.parse_args()
     args.fn(args)

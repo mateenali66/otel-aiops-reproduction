@@ -1,0 +1,6 @@
+incident_id,start,end,summary
+INC-1041,2026-03-01T14:20:00Z,2026-03-01T15:15:00Z,checkout latency spike
+INC-1042,2026-03-02T15:05:00Z,2026-03-02T17:15:00Z,payment gateway timeouts
+INC-1043,2026-03-04T02:40:00Z,2026-03-04T03:20:00Z,cache stampede
+INC-1044,2026-03-05T14:15:00Z,2026-03-05T17:45:00Z,database connection pool exhaustion
+INC-1045,2026-03-07T10:00:00Z,2026-03-07T11:15:00Z,partial region failure
