@@ -554,6 +554,12 @@ def cmd_check(args) -> None:
     out = byod.write_outputs(result, Path(args.out) / label)
     log((out / "check_report.md").read_text())
     log(f"written: {out}/check_result.json, check_report.md")
+    # --no-sweep holds the reported verdict at the bucket you picked. It must never turn a
+    # non-zero exit into a zero one, or a continuous integration job reading only the exit
+    # code passes on a run whose verdict is not stable across bucket sizes and never sees
+    # the text saying so. A suppressed UNSTABLE exits as UNSTABLE.
+    if result.get("results", {}).get("sweep_suppressed_unstable"):
+        sys.exit(VERDICT_EXIT_CODES["UNSTABLE"])
     sys.exit(VERDICT_EXIT_CODES[result["verdict"]])
 
 
@@ -641,11 +647,15 @@ def main() -> None:
                    help="name the optional service or scope column in the incidents CSV. "
                         "Defaults to --scope-col.")
     s.add_argument("--no-sweep", action="store_true",
-                   help="in alerts mode, hold the verdict and the exit code at the bucket "
-                        "you passed. The sweep still runs and the report still shows it, so "
-                        "a run that would have been UNSTABLE says so instead of coming back "
-                        "as a clean PASS. The sweep decides the verdict by default because "
-                        "a coarse bucket can move it on its own.")
+                   help="in alerts mode, hold the reported verdict at the bucket you "
+                        "passed. The sweep still runs and the report still shows it, so a "
+                        "run that would have been UNSTABLE says so instead of coming back "
+                        "as a clean PASS. The exit code is not held: a suppressed UNSTABLE "
+                        "still exits 4, because this flag must not turn a failing run into "
+                        "a passing exit code. check_result.json carries "
+                        "sweep_suppressed_unstable so a script can tell the two apart. The "
+                        "sweep decides the verdict by default because a coarse bucket can "
+                        "move it on its own.")
     s.add_argument("--label", default=None, help="subdirectory name under --out")
     s.add_argument("--out", default=str(OUT_DIR / "check"))
     s.set_defaults(fn=cmd_check)

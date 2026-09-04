@@ -31,10 +31,8 @@ from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 RANDOM_AUC_REFERENCE = 0.5      # section 7, ROC family
 FLOOR_MARGIN = 0.05             # section 8b, "stated margin" used by this package (5 percent)
 RECALL_SATURATION = 0.95        # section 8b, "recall near saturation"
-ALERT_RATE_SATURATION = 0.5     # section 8b read on the alerted rate, see alert_rate_saturated
-ALERT_RATE_MULTIPLE = 4.0       # ... and how far above prevalence that rate has to sit
-ALERT_RATE_RATIO_FLOOR = 0.20   # the second path in, see alert_rate_saturated
-ALERT_RATE_RATIO_MULTIPLE = 10.0
+ALERT_RATE_PRODUCT = 2.0        # section 8b read on the alerted rate, see alert_rate_saturated
+ALERT_RATE_MULTIPLE = 4.0       # not a guard constant. the ratio worth printing, see byod
 DEGENERATE_AUC = 0.55           # article rule (Table 12)
 DEGENERATE_F1_RATIO = 0.95      # article rule (Table 12)
 
@@ -90,54 +88,55 @@ def alert_rate_saturated(alerted_rate: float, prevalence: float) -> bool:
     prevalence of 0.043 scores F1 0.087 against a floor of 0.082, which is 5.6 percent
     above the floor and so lands just outside a 5 percent margin. Nothing else excluded it.
 
-    The alerted rate against prevalence separates the two cases the F1 form confuses.
-    A detector that works alerts about as often as things are actually anomalous, so its
+    The alerted rate against prevalence separates the two cases the F1 form confuses. A
+    detector that works alerts about as often as things are actually anomalous, so its
     alerted rate sits near prevalence. A detector that flags everything alerts far more
     often than anything is wrong.
 
-    There are two ways in, and a detector only has to walk through one of them.
+    The rule is one line. The guard fires when the alerted rate squared reaches
+    ALERT_RATE_PRODUCT (2) times prevalence. Since the alerted rate over prevalence equals
+    recall over precision, that is the same as saying the alerted rate multiplied by its
+    ratio to prevalence reaches 2. A detector may alert often, or it may alert far more
+    often than incidents occur. It may not do both.
 
-    Path A, the obvious case. The alerted rate is at or above ALERT_RATE_SATURATION (0.5),
-    so the detector spends the majority of the wall-clock time in an alerting state and
-    silence is the exception, AND it is at or above ALERT_RATE_MULTIPLE (4) times
-    prevalence. Since alerted rate over prevalence equals recall over precision, the
-    multiple of 4 means that at full recall no more than one alert in four lands on an
-    incident. The multiple is what stops a detector being caught for working on data where
-    most of the time really is anomalous. At a prevalence of 0.6 a perfect detector alerts
-    60 percent of the time and it has to keep its PASS.
+    Why a curve and not a pair of thresholds. This started as one condition, then two, and
+    both shapes had the same defect. A threshold that is constant in prevalence has a flat
+    region, and inside that region the constant decides alone while the ratio never binds.
+    The two-path version narrowed the flat regions without removing them: at a prevalence
+    of 0.002 a detector alerting a hundred times more often than anything was wrong still
+    passed, because 0.20 was an absolute floor and nothing else could reach it. It also put
+    a step at every kink, so a detector could cross from PASS to EXCLUDE on a rounding-level
+    move in prevalence, which made bucket sweeps read as unstable for a reason that had
+    nothing to do with the detector.
 
-    Path B, the case path A cannot see. Because 4 x 0.125 = 0.5, the multiple in path A is
-    implied by the rate whenever prevalence is under 0.125, and real incident data almost
-    never sits above that. So on real data path A collapses to "alerts more than half the
-    time" and the ratio never binds. A detector can then alert on 40 percent of a fourteen
-    day timeline where 4 percent of it is anomalous, which is 10 times as often as anything
-    was wrong, and pass with the best F1 in the table. Measured on real exports, 0.499
-    passed and 0.500 excluded, and nothing between prevalence and 0.5 made any difference.
+    The curve keeps the two anchors the threshold design had already chosen, and joins
+    them instead of stepping between them. At a prevalence of 0.02 the bar is 0.20 and at
+    0.125 it is 0.50, which is exactly where the old floors sat. Everywhere else it
+    interpolates, so the ratio always binds and the bar always moves with prevalence.
 
-    So path B fires at a lower alerted rate when the ratio is high enough to earn it. The
-    alerted rate is at or above ALERT_RATE_RATIO_FLOOR (0.20) AND at or above
-    ALERT_RATE_RATIO_MULTIPLE (10) times prevalence.
+    The safety property is unchanged and is now provable rather than tested. A perfect
+    detector has an alerted rate equal to prevalence, so it fires only when prevalence
+    squared reaches twice prevalence, meaning a prevalence of 2, which cannot happen. A
+    perfect detector cannot be caught here at any prevalence.
 
-      The floor of 0.20 is what protects the case ALERT_RATE_SATURATION was protecting. At
-      very low prevalence a rare-incident detector legitimately alerts many times more often
-      than incidents occur and must keep its PASS. At a prevalence of 0.001, alerting on 1
-      percent of the time with perfect recall is excellent work and is ten times prevalence,
-      and 0.01 is a twentieth of this floor. A detector in an alerting state for one hour in
-      five is not watching for a rare event, whatever its prevalence.
+    The bar also stays stricter than the predict-all baseline it exists to catch. At full
+    recall the guard fires below a precision of sqrt(prevalence / 2), and that is above
+    prevalence, which is the precision predict-all achieves, for every prevalence under 0.5.
 
-      The multiple of 10 is two and a half times path A's, which is the price of the lower
-      floor. At full recall it means fewer than one alert in ten lands on an incident. The
-      band it opens is narrow on purpose. A detector alerting between a fifth and a half of
-      the time keeps its PASS at any ratio under 10.
-
-    A perfect detector has an alerted rate equal to prevalence, so the multiple fails for it
-    on both paths at any prevalence. It cannot be caught here.
+    Rare incidents are still protected. At a prevalence of 0.001 the bar is 0.045, so a
+    detector alerting on 1 percent of the time with perfect recall is ten times prevalence
+    and comfortably clear of it. What it no longer permits is a ratio of two hundred.
     """
-    path_a = bool(alerted_rate >= ALERT_RATE_SATURATION
-                  and alerted_rate >= ALERT_RATE_MULTIPLE * prevalence)
-    path_b = bool(alerted_rate >= ALERT_RATE_RATIO_FLOOR
-                  and alerted_rate >= ALERT_RATE_RATIO_MULTIPLE * prevalence)
-    return bool(path_a or path_b)
+    return bool(alerted_rate * alerted_rate >= ALERT_RATE_PRODUCT * float(prevalence))
+
+
+def alert_rate_bar(prevalence: float) -> float:
+    """The alerted rate at which the guard fires, at this prevalence.
+
+    This is the same rule as alert_rate_saturated solved for the rate, so a report can
+    print the bar a detector had to stay under instead of only whether it cleared it.
+    """
+    return math.sqrt(ALERT_RATE_PRODUCT * float(prevalence))
 
 
 def check_row(prevalence: float, f1: float, recall: float, auc_roc: float,

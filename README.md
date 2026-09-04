@@ -645,61 +645,94 @@ The alerted rate against prevalence separates the two cases cleanly. A detector 
 alerts about as often as things are actually anomalous, so its alerted rate sits near
 prevalence. A detector that flags everything alerts far more often than anything is wrong.
 
-There are two ways into the guard and a detector only has to walk through one of them.
+The rule is one line. **The guard fires when the alerted rate squared reaches twice
+prevalence.** Since the alerted rate divided by prevalence is recall divided by precision,
+that is the same as saying the alerted rate multiplied by its ratio to prevalence reaches 2.
+You may alert often, or you may alert far more often than incidents occur. You may not do
+both. `ALERT_RATE_PRODUCT` in `fdes/checks.py` sets the 2, and `alert_rate_bar` solves the
+rule for the rate so a report can print the bar a detector had to stay under.
 
-**Path A, the obvious case.** The alerted rate is at or above 0.5, so the detector spends
-the majority of the wall-clock time in an alerting state and silence is the exception, and
-it is at or above four times prevalence. The alerted rate divided by prevalence is recall
-divided by precision, so the multiple of four says that at full recall no more than one
-alert in four lands on an incident. The multiple is what stops a detector being condemned
-for the shape of its data. Where most of the time really is anomalous, say a prevalence of
-0.6, a perfect detector alerts 60 percent of the time and has to keep its `PASS`.
+**Why a curve and not a threshold.** This started as one condition, then two, and both
+shapes had the same defect. A threshold that is constant in prevalence has a flat region,
+and inside that region the constant decides alone while the ratio never binds. The first
+shape was flat below a prevalence of 0.125, because four times 0.125 is 0.5, and real
+incident data almost never sits above 0.125. The two-path shape that replaced it narrowed
+the flat regions rather than removing them, and two of them survived:
 
-**Path B, the case path A cannot see.** Path A alone had a defect that took a second real
-dataset to find. Four times 0.125 is 0.5, so the multiple is implied by the rate whenever
-prevalence is under 0.125, and real incident data almost never sits above that. On real data
-path A collapsed to "alerts more than half the time" and the ratio never bound on anything.
-Measured at a prevalence of 0.0397, a detector alerting on 40 percent of a fourteen day
-timeline is alerting 10.1 times as often as anything was wrong, and it passed at exit 0 with
-the best F1 in the table. A rate of 0.499 passed and 0.500 excluded. A step function, with
-nothing between prevalence and 0.5 looking at all.
+| prevalence | the bar under the two-path shape | ratio it allowed |
+|---|---|---|
+| at or below 0.02 | 0.20, an absolute floor | up to 200 |
+| 0.02 to 0.05 | ten times prevalence | 10 |
+| 0.05 to 0.125 | 0.50, an absolute floor | 4 to 10 |
+| above 0.125 | four times prevalence | 4 |
 
-So path B fires at a lower alerted rate when the ratio is high enough to earn it. The
-alerted rate is at or above 0.20 and at or above ten times prevalence.
+At a prevalence of 0.002 a detector alerting on 19.89 percent of the timeline passed and one
+alerting on 20.09 percent was excluded, and both were alerting about a hundred times more
+often than anything was wrong. The 0.20 decided it and the ratio was irrelevant. The 0.05 to
+0.125 stretch is worse, because that is ordinary prevalence rather than a corner.
 
-The floor of 0.20 is what now protects the case the 0.5 floor was protecting. At very low
-prevalence a rare-incident detector legitimately alerts many times more often than incidents
-occur and must keep its `PASS`. At a prevalence of 0.001, alerting on 1 percent of the time
-with perfect recall is excellent work and is ten times prevalence, and 0.01 is a twentieth
-of this floor. A detector in an alerting state for one hour in five is not watching for a
-rare event, whatever its prevalence.
+Flat regions also make bucket sweeps read as unstable for a reason that has nothing to do
+with the detector. At a kink, a rounding-level move in prevalence can carry the threshold
+past a fixed alerted rate, so the same detector flips verdict between two bucket sizes.
 
-The multiple of ten is two and a half times path A's, and that is the price of the lower
-floor. At full recall it means fewer than one alert in ten lands on an incident. The band
-the two paths leave open is narrow on purpose. A detector alerting between a fifth and a
-half of the time keeps its `PASS` at any ratio under ten.
+The curve keeps the two anchors the threshold design had already chosen and joins them
+instead of stepping between them. At a prevalence of 0.02 the bar is 0.20 and at 0.125 it is
+0.50, exactly where the old floors sat. Everywhere else it interpolates, so the ratio always
+binds and the bar always moves with prevalence.
 
-A perfect detector has an alerted rate equal to prevalence, so the multiple fails for it on
-both paths at any prevalence. It cannot be caught here. That matters, because the one-sided
-version of section 8b this package used to ship excluded any detector with recall at or
-above 0.95 whatever its F1, which wrongly excluded a detector scoring F1 1.0 at recall 1.0.
-The two-sided margin fixed that and opened the hole above. Reading the alerted rate closes
-the hole without reopening the original defect.
+| prevalence | the bar | ratio it allows |
+|---|---|---|
+| 0.001 | 0.045 | 45 |
+| 0.010 | 0.141 | 14 |
+| 0.020 | 0.200 | 10 |
+| 0.050 | 0.316 | 6.3 |
+| 0.125 | 0.500 | 4 |
+| 0.300 | 0.775 | 2.6 |
 
-`ALERT_RATE_SATURATION`, `ALERT_RATE_MULTIPLE`, `ALERT_RATE_RATIO_FLOOR` and
-`ALERT_RATE_RATIO_MULTIPLE` in `fdes/checks.py` set the four thresholds. The guard applies
-in both modes, and in scores mode it applies at whatever operating point the threshold
-produces, so a score that ranks buckets well still cannot reach `PASS` while its operating
-point flags most of the timeline.
+**A perfect detector cannot be caught, and this is now provable rather than tested.** A
+perfect detector has an alerted rate equal to prevalence, so it fires only when prevalence
+squared reaches twice prevalence, meaning a prevalence of 2. That cannot happen. This
+matters, because the one-sided version of section 8b this package used to ship excluded any
+detector with recall at or above 0.95 whatever its F1, which wrongly excluded a detector
+scoring F1 1.0 at recall 1.0. The two-sided margin fixed that and opened the hole above.
+Reading the alerted rate closes the hole without reopening the original defect.
 
-**Known limit.** Both floors sit above where the real detectors measured so far actually
-landed. Across two independent datasets, twelve bucket sizes and two ground-truth variants,
-the alerted rate topped out at 0.396 on one and 0.486 on the other, while the ratio ran from
-11.7 to 14.7. Path B now catches the top of that range and the band under it is still open.
-So the ratio is doing the informing and the floors are doing the excluding, and the report
-prints the ratio next to the verdict whenever it reaches four times prevalence and neither
-path fired. Two datasets is not enough to move a floor again. It is enough to say where the
-floors sit relative to the evidence.
+**Rare incidents are still protected.** At a prevalence of 0.001 the bar is 0.045, so a
+detector alerting on 1 percent of the time with perfect recall is ten times prevalence and
+well clear of it. What the curve no longer permits is a ratio of two hundred.
+
+**The bar stays stricter than the baseline it exists to catch.** At full recall the guard
+fires below a precision of the square root of half the prevalence, and that sits above
+prevalence, which is the precision flagging everything achieves, for every prevalence under
+0.5.
+
+**When it fires on a detector that works.** This is the check most likely to catch a real
+detector that finds incidents and simply costs too much to page on. A detector at a
+prevalence of 0.02 alerting on 20 percent of the timeline with recall 1.000 scores 4.64
+times the predict-all floor and is still excluded. That is the intended judgement, but a
+bare `EXCLUDE` plus a sentence about alert volume reads as "this does not detect anything",
+which is the opposite of what happened. So when the guard fires while the detector has lift
+over the floor or high recall, the exclusion says so in words: excluded on alert volume, not
+on failing to detect, with the lift and the recall named, and the trade handed back to the
+reader as a judgement about their own on-call load.
+
+The guard applies in both modes, and in scores mode it applies at whatever operating point
+the threshold produces, so a score that ranks buckets well still cannot reach `PASS` while
+its operating point flags most of the timeline.
+
+**Known limit, and where the evidence actually sits.** Two production observability
+exports have been run through this, one on Datadog and one on Splunk. On the Datadog export
+the alerted rate ran 0.292 to 0.396 across four bucket sizes and two ground-truth variants,
+with the ratio to prevalence running 11.7 to 14.8 once two multi-day stale incident rows
+were removed. Every one of those now excludes on the curve, where several of them passed
+under the earlier shapes. On the Splunk export the top rate was 0.945 and it excluded under
+every shape.
+
+Two datasets is not enough to move the constant again. It is enough to say where the bar
+sits relative to the only real measurements there are, which is below all of them. The
+report prints the ratio next to the verdict whenever it reaches four times prevalence and
+the guard did not fire, so the number that carries the information is visible even when
+nothing acts on it.
 
 ### There is no minimum recall
 
@@ -1033,15 +1066,15 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.2.0},
+  version   = {1.3.0},
   publisher = {Zenodo},
   year      = {2026},
-  doi       = {10.5281/zenodo.22309308}
+  doi       = {10.5281/zenodo.22309755}
 }
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.22309308](https://doi.org/10.5281/zenodo.22309308) (v1.2.0, concept DOI
+[10.5281/zenodo.22309755](https://doi.org/10.5281/zenodo.22309755) (v1.3.0, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,

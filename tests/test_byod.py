@@ -10,6 +10,7 @@ or
 """
 from __future__ import annotations
 
+import math
 import json
 import subprocess
 import sys
@@ -239,8 +240,9 @@ class TestFlagEverything(TempCase):
         res = r["results"]
         self.assertAlmostEqual(res["prevalence"], 0.6, places=4)
         self.assertEqual(res["f1_score"], 1.0)
-        self.assertGreater(res["degenerate_output"]["alerted_rate"],
-                           byod.ALERT_RATE_SATURATION)
+        # An alerted rate of 0.6 would look damning on its own. Measured against
+        # prevalence it is exactly right, so the guard cannot reach it.
+        self.assertGreater(res["degenerate_output"]["alerted_rate"], 0.5)
         self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertEqual(r["verdict"], "PASS")
 
@@ -251,8 +253,7 @@ class TestFlagEverything(TempCase):
                         "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n"
                         "2026-03-01T20:00:00Z,2026-03-01T20:10:00Z\n")
         res = r["results"]
-        self.assertLess(res["degenerate_output"]["alerted_rate"],
-                        byod.ALERT_RATE_SATURATION)
+        self.assertLess(res["degenerate_output"]["alerted_rate"], res["alert_rate_bar"])
         self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertEqual(r["verdict"], "PASS")
 
@@ -295,18 +296,20 @@ class TestFlagEverything(TempCase):
                            incidents=incidents)
 
 
-class TestAlertRateSecondPath(TempCase):
-    """The guard used to be one gate with a redundant condition, so it had one real bar.
+class TestAlertRateCurve(TempCase):
+    """The guard is one curve now, because both threshold shapes before it had flat regions.
 
-    Because 4 x 0.125 = 0.5, the multiple in path A is implied by the rate whenever
-    prevalence is under 0.125, and real incident data almost never sits above that. So the
-    guard was really just "alerts more than half the time" and the ratio never bound. On the
-    second real run a detector alerting on 40 percent of a fourteen day timeline where 3.97
-    percent of it was anomalous passed at exit 0 with the best F1 in the table. 0.499 passed
-    and 0.500 excluded, with a step function in between and nothing else looking.
+    A threshold that is constant in prevalence has a stretch where the constant decides
+    alone and the ratio never binds. The single-condition shape was flat below a prevalence
+    of 0.125, which is almost all real data. The two-path shape narrowed that but kept two
+    flat stretches, and at a prevalence of 0.002 a detector alerting a hundred times more
+    often than anything was wrong still passed. The curve fires when the alerted rate
+    squared reaches twice prevalence, which has no flat region anywhere and still cannot
+    catch a perfect detector.
     """
 
-    # 57 anomalous buckets of 1440, so prevalence is 0.0396, which is the real figure.
+    # 57 anomalous buckets of 1440, so prevalence is 0.0396. This is a constructed boundary
+    # case, not a measurement taken from anyone's production data.
     INCIDENT = "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:57:00Z\n"
 
     def at_rate(self, alerted_buckets: int, **kwargs):
@@ -318,32 +321,51 @@ class TestAlertRateSecondPath(TempCase):
                            f"2026-03-01T06:00:00Z,2026-03-01T{end_h:02d}:{end_m:02d}:00Z\n",
                            incidents=incidents, sweep=False, **kwargs)
 
-    def test_forty_percent_at_four_percent_prevalence_now_excludes(self):
+    def test_forty_percent_at_four_percent_prevalence_excludes(self):
         res = self.at_rate(576)["results"]
         self.assertAlmostEqual(res["prevalence"], 0.0396, places=4)
         self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.400, places=4)
         self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 10.1, places=1)
         self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
-        self.assertEqual(res["alert_rate_path"], "B")
+        self.assertEqual(res["alert_rate_path"], "curve")
 
-    def test_the_old_shape_would_have_passed_it(self):
+    def test_the_report_prints_the_bar_the_detector_had_to_stay_under(self):
         res = self.at_rate(576)["results"]
-        # Nothing else in the procedure touches this run. Path A cannot see it, and every
-        # other check reports pass, so before the second path it was a PASS at exit 0.
-        self.assertLess(res["degenerate_output"]["alerted_rate"],
-                        byod.ALERT_RATE_SATURATION)
+        self.assertAlmostEqual(res["alert_rate_bar"],
+                               math.sqrt(byod.ALERT_RATE_PRODUCT * res["prevalence"]),
+                               places=4)
+        self.assertIn(f"guard fires at an alerted rate of {res['alert_rate_bar']:.3f}",
+                      " ".join(res["exclusion_reasons"]))
+
+    def test_the_original_single_condition_shape_would_have_passed_it(self):
+        res = self.at_rate(576)["results"]
+        # Nothing else in the procedure touches this run. Every other check reports pass,
+        # so under the original shape it was a PASS at exit 0.
         self.assertGreater(res["f1_over_floor"], 2.0)
         self.assertFalse(res["checks"]["no_lift_over_predict_all"])
         self.assertFalse(res["checks"]["sec8b_flag_everything"])
         self.assertFalse(res["checks"]["degenerate_output"])
         self.assertEqual(len(res["exclusion_reasons"]), 1)
 
-    def test_the_reason_names_the_lower_floor_rather_than_the_majority_of_the_time(self):
-        reasons = " ".join(self.at_rate(576)["results"]["exclusion_reasons"])
-        self.assertIn("10 times as often as anything was wrong", reasons)
-        self.assertIn("on 40.0 percent of the wall-clock time", reasons)
-        self.assertIn("over the 20 percent", reasons)
-        self.assertNotIn("majority of the wall-clock time", reasons)
+    def test_the_exclusion_says_it_is_about_volume_and_not_about_detection(self):
+        # A real detector that finds everything and pages too much is the case this guard
+        # is most likely to fire on. Without this clause an operator reads EXCLUDE plus a
+        # sentence about alert volume and concludes the detector does not detect.
+        res = self.at_rate(576)["results"]
+        reasons = " ".join(res["exclusion_reasons"])
+        self.assertGreater(res["f1_over_floor"], 1.0)
+        self.assertIn("excluded on alert volume, not on failing to detect", reasons)
+        self.assertIn("times the predict-all floor", reasons)
+        self.assertIn("judgement about your on-call load", reasons)
+
+    def test_a_detector_with_no_lift_gets_no_counterweight(self):
+        # The clause is only honest when the detector actually found something.
+        res = TestFlagEverything.real_flag_everything(self)["results"]
+        self.assertIn("alert_rate_far_above_prevalence", res["checks"])
+        if res["f1_over_floor"] is not None and res["f1_over_floor"] <= 1.0 \
+                and res["recall"] < byod.RECALL_SATURATION:
+            self.assertNotIn("excluded on alert volume",
+                             " ".join(res["exclusion_reasons"]))
 
     def test_the_step_at_the_old_floor_is_gone(self):
         # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
@@ -352,8 +374,8 @@ class TestAlertRateSecondPath(TempCase):
             self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"], buckets)
 
     def test_a_rare_incident_detector_that_alerts_rarely_keeps_its_pass(self):
-        # The case the absolute floor exists to protect. Prevalence 0.0014, alerted rate
-        # 0.0139, so exactly ten times prevalence and a twentieth of the lower floor.
+        # Prevalence 0.0014, alerted rate 0.0139, so ten times prevalence. The bar at this
+        # prevalence is about 0.053, so the detector is well clear of it.
         incidents = write(self.tmp, "two_minutes.csv",
                           "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:02:00Z\n")
         r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T02:02:00Z\n"
@@ -361,16 +383,14 @@ class TestAlertRateSecondPath(TempCase):
                         incidents=incidents, sweep=False)
         res = r["results"]
         self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.0139, places=4)
-        self.assertAlmostEqual(res["alerted_rate_over_prevalence"],
-                               byod.ALERT_RATE_RATIO_MULTIPLE, places=2)
-        self.assertLess(res["degenerate_output"]["alerted_rate"],
-                        byod.ALERT_RATE_RATIO_FLOOR)
+        self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 10.0, places=1)
+        self.assertLess(res["degenerate_output"]["alerted_rate"], res["alert_rate_bar"])
         self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertEqual(r["verdict"], "PASS")
 
     def test_a_perfect_detector_on_busy_data_still_passes(self):
-        # Prevalence 0.6, alerted rate 0.6, so path A's multiple stops it and path B's
-        # ratio stops it. Neither path reaches a detector that is exactly right.
+        # Prevalence 0.6, alerted rate 0.6. A perfect detector fires the guard only if
+        # prevalence squared reaches twice prevalence, so it cannot be caught at all.
         busy = write(self.tmp, "busy_incidents.csv",
                      "start,end\n2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n")
         r = self.alerts("2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n", incidents=busy,
@@ -381,20 +401,13 @@ class TestAlertRateSecondPath(TempCase):
         self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertEqual(r["verdict"], "PASS")
 
-    def test_the_check_table_names_both_paths(self):
-        report = byod.render_report(self.at_rate(576))
-        self.assertIn(f"rate >= {byod.ALERT_RATE_SATURATION} and >= "
-                      f"{int(byod.ALERT_RATE_MULTIPLE)} x p, or rate >= "
-                      f"{byod.ALERT_RATE_RATIO_FLOOR} and >= "
-                      f"{int(byod.ALERT_RATE_RATIO_MULTIPLE)} x p", report)
+    def test_the_check_table_names_the_rule_and_the_bar(self):
+        res = self.at_rate(576)
+        report = byod.render_report(res)
+        self.assertIn(f"rate^2 >= {int(byod.ALERT_RATE_PRODUCT)} x p", report)
+        self.assertIn(f"bar = {res['results']['alert_rate_bar']:.3f}", report)
 
-    def test_path_a_still_names_itself(self):
-        res = TestFlagEverything.real_flag_everything(self)["results"]
-        self.assertEqual(res["alert_rate_path"], "A")
-        self.assertIn("majority of the wall-clock time",
-                      " ".join(res["exclusion_reasons"]))
-
-    def test_the_command_line_exits_two_on_the_second_path(self):
+    def test_the_command_line_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             (d / "incidents.csv").write_text(self.INCIDENT)
@@ -567,31 +580,32 @@ class TestAlertedRateRatio(TempCase):
         self.assertIn("2.1 percent", body)
 
     def test_the_notice_says_why_neither_path_of_the_guard_reached_it(self):
-        body = byod.render_report(self.high_ratio())
-        self.assertIn("Neither path of the flag-everything guard reaches it", body)
-        self.assertIn(f"{byod.ALERT_RATE_SATURATION} on one path", body)
-        self.assertIn(f"{byod.ALERT_RATE_RATIO_FLOOR} on the other", body)
+        r = self.high_ratio()
+        body = byod.render_report(r)
+        bar = r["results"]["alert_rate_bar"]
+        self.assertIn("The flag-everything guard does not reach it", body)
+        self.assertIn(f"the guard fires at an alerted rate of {bar:.3f}", body)
+        self.assertIn("The bar moves with prevalence on purpose", body)
         self.assertIn("not condemned for working", body)
         self.assertIn("reported rather than acted on", body)
 
-    def test_a_run_in_the_band_between_the_two_paths_names_both_of_them(self):
-        # Alerted rate 0.292 at prevalence 0.0625, so the ratio is 4.67. Over the lower
-        # floor of 0.20 and under the ratio of 10 that floor asks for.
+    def test_a_ratio_worth_printing_under_the_bar_is_reported_not_acted_on(self):
+        # Alerted rate 0.292 at prevalence 0.0625, so the ratio is 4.67, over the 4 that is
+        # worth printing. The bar at this prevalence is 0.354, so the guard stays silent.
         r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
                         "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n", sweep=False)
         res = r["results"]
-        self.assertGreater(res["degenerate_output"]["alerted_rate"],
-                           byod.ALERT_RATE_RATIO_FLOOR)
-        self.assertLess(res["alerted_rate_over_prevalence"],
-                        byod.ALERT_RATE_RATIO_MULTIPLE)
+        self.assertGreater(res["alerted_rate_over_prevalence"], byod.RATIO_NOTICE_MULTIPLE)
+        self.assertLess(res["degenerate_output"]["alerted_rate"], res["alert_rate_bar"])
         self.assertTrue(res["alerted_rate_ratio_high"])
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         body = byod.render_report(r)
-        self.assertIn("sits in the band between them", body)
+        self.assertIn("The flag-everything guard does not reach it", body)
 
     def test_the_ratio_also_lands_in_the_check_table(self):
         report = byod.render_report(self.high_ratio())
         self.assertIn("| Alerted rate against prevalence | 8b | alerted rate = 0.150, "
-                      "p = 0.0208, ratio = 7.2x |", report)
+                      "p = 0.0208, ratio = 7.2x, bar = 0.204 |", report)
 
     def test_the_reporting_threshold_is_the_guards_own_multiple(self):
         self.assertEqual(byod.RATIO_NOTICE_MULTIPLE, byod.ALERT_RATE_MULTIPLE)
@@ -1246,10 +1260,41 @@ class TestBucketSweep(TempCase):
         self.assertTrue(r["results"]["sweep_suppressed_unstable"])
         report = byod.render_report(r)
         self.assertIn("UNSTABLE suppressed by --no-sweep.", report)
-        self.assertIn("this run is UNSTABLE at exit 4", report)
+        self.assertIn("The exit code is still 4, which is UNSTABLE", report)
+        self.assertIn("not allowed to turn a failing run into a passing exit code", report)
         self.assertIn("verdict above is EXCLUDE at the 1m bucket you picked", report)
         self.assertLess(report.index("UNSTABLE suppressed by --no-sweep."),
                         report.index("| Check | Section |"))
+
+    def test_no_sweep_cannot_turn_a_failing_run_into_a_passing_exit_code(self):
+        # The defect two independent reviewers found in v1.2.0. The flag held the exit code
+        # as well as the verdict, so a continuous integration job reading only the exit code
+        # passed on a run whose verdict was not stable across bucket sizes, and never saw
+        # the paragraph saying so. The flag holds the reported verdict. It does not get to
+        # hold the exit code.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(INCIDENTS)
+            (d / "alerts.csv").write_text(
+                "start,end\n"
+                "2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+            def run(*extra):
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check",
+                     "--alerts", str(d / "alerts.csv"),
+                     "--incidents", str(d / "incidents.csv"),
+                     "--bucket", "60s", "--from", DAY_FROM, "--to", DAY_TO,
+                     "--out", str(d / "out"), *extra],
+                    cwd=ROOT, capture_output=True, text=True)
+            swept = run()
+            held = run("--no-sweep", "--label", "held")
+            self.assertEqual(swept.returncode, 4, swept.stdout + swept.stderr)
+            self.assertEqual(held.returncode, 4, held.stdout + held.stderr)
+            # The reported verdict still moves with the flag. Only the exit code is pinned.
+            self.assertIn("Verdict: **UNSTABLE**", swept.stdout)
+            self.assertIn("UNSTABLE suppressed by --no-sweep.", held.stdout)
+            self.assertNotIn("Verdict: **UNSTABLE**", held.stdout)
 
     def test_no_sweep_on_a_stable_run_suppresses_nothing(self):
         r = self.stable(sweep=False)
@@ -2001,9 +2046,13 @@ class TestCli(unittest.TestCase):
             self.assertIn("not stable across bucket sizes", p.stdout)
             result = json.loads((d / "out" / "alerts" / "check_result.json").read_text())
             self.assertTrue(result["results"]["bucket_sweep"]["unstable"])
-            # And --no-sweep gives the single-bucket answer back, for anyone who wants it.
+            # And --no-sweep gives the single-bucket answer back in the report, for anyone
+            # who wants it. The exit code stays at 4, because a flag that changes which
+            # verdict is printed must not also decide whether a script sees a failure.
             q = self.run_check(*args, "--no-sweep")
-            self.assertEqual(q.returncode, 2, q.stdout + q.stderr)
+            self.assertEqual(q.returncode, 4, q.stdout + q.stderr)
+            self.assertIn("UNSTABLE suppressed by --no-sweep.", q.stdout)
+            self.assertIn("Verdict: **EXCLUDE**", q.stdout)
 
     def test_the_scope_flags_are_documented_in_help(self):
         p = subprocess.run(

@@ -42,10 +42,10 @@ import numpy as np
 import pandas as pd
 
 from . import SPEC_VERSION
-from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_RATIO_FLOOR,
-                     ALERT_RATE_RATIO_MULTIPLE, ALERT_RATE_SATURATION, DEGENERATE_AUC,
+from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_PRODUCT, DEGENERATE_AUC,
                      DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE, RANDOM_AUC_REFERENCE,
-                     RECALL_SATURATION, alert_rate_saturated, check_state, flag_everything,
+                     RECALL_SATURATION, alert_rate_bar, alert_rate_saturated,
+                     check_state, flag_everything,
                      predict_all_f1)
 
 # Header names seen in real exports. Matching is case insensitive and ignores surrounding
@@ -1023,9 +1023,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # display, and at a low prevalence that rounding moves the ratio by a whole percent.
     alert_rate = float(pred.mean()) if n else 0.0
     saturated = bool(both_classes and alert_rate_saturated(alert_rate, prevalence))
-    # Which of the guard's two paths let it through, so the reason can say the right thing.
-    path_a = bool(saturated and alert_rate >= ALERT_RATE_SATURATION
-                  and alert_rate >= ALERT_RATE_MULTIPLE * prevalence)
+    # The bar the detector had to stay under, so the report can print it rather than only
+    # say whether it was cleared.
+    rate_bar = alert_rate_bar(prevalence) if both_classes else None
     no_lift = bool(both_classes and pm["f1_score"] <= floor)
     table12 = bool(computed.get("auc_roc") is not None
                    and computed["auc_roc"] <= DEGENERATE_AUC
@@ -1050,16 +1050,33 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                            f"{round(floor, 4)} while recall {pm['recall']} is at or above "
                            f"{RECALL_SATURATION}, which is the flag-everything regime")
         if saturated and not deg["alerts_on_everything"]:
-            where = ("on the majority of the wall-clock time" if path_a else
-                     f"on {alert_rate * 100:.1f} percent of the wall-clock time, which is "
-                     f"over the {ALERT_RATE_RATIO_FLOOR * 100:.0f} percent that a ratio this "
-                     f"high is measured against")
+            # This guard is the one most likely to fire on a real detector that works and
+            # simply costs too much to page on. When it does, the exclusion sentence has to
+            # carry what the detector got right, or an operator reads "EXCLUDE" plus a
+            # sentence about alert volume and concludes the thing does not detect anything.
+            lift = (pm["f1_score"] / floor) if floor else None
+            found_things = bool((lift is not None and lift > 1.0)
+                                or pm["recall"] >= RECALL_SATURATION)
+            counterweight = ""
+            if found_things:
+                bits = []
+                if lift is not None and lift > 1.0:
+                    bits.append(f"F1 is {lift:.2f} times the predict-all floor")
+                if pm["recall"] >= RECALL_SATURATION:
+                    bits.append(f"recall is {pm['recall']:.3f}")
+                counterweight = (
+                    f". Read this as excluded on alert volume, not on failing to detect: "
+                    f"{' and '.join(bits)}. The detector is finding incidents. It is also "
+                    f"alerting far more often than there are incidents to find, and this "
+                    f"procedure does not accept that trade at this prevalence. Whether it "
+                    f"is worth paging on is a judgement about your on-call load")
             reasons.append(
                 f"The detector alerted on {alert_rate * 100:.1f} percent of the buckets in "
-                f"the range while only {prevalence * 100:.1f} percent of them fall inside an "
-                f"incident window. That is {alert_rate / prevalence:.0f} times as often as "
-                f"anything was wrong, {where}, which is the "
-                f"flag-everything regime measured by alerted time rather than by F1")
+                f"the range while only {prevalence * 100:.1f} percent of them fall inside "
+                f"an incident window. That is {alert_rate / prevalence:.0f} times as often "
+                f"as anything was wrong. At this prevalence the guard fires at an alerted "
+                f"rate of {rate_bar:.3f}, and {alert_rate:.3f} reaches it"
+                + counterweight)
         if no_lift and not sec8b:
             reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
                            f"{round(floor, 4)}, so flagging every bucket would have scored "
@@ -1099,7 +1116,10 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alerted_rate_ratio_notice_multiple"] = RATIO_NOTICE_MULTIPLE
     computed["alerted_rate_ratio_high"] = bool(
         evaluable and not saturated and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
-    computed["alert_rate_path"] = ("A" if path_a else "B") if saturated else None
+    computed["alert_rate_bar"] = round(rate_bar, 4) if rate_bar is not None else None
+    # Kept for anything reading the v1.2.0 field. There is one rule now, so it is either
+    # the curve or nothing.
+    computed["alert_rate_path"] = "curve" if saturated else None
     # There is no minimum recall, on purpose. A PASS carried by precision alone is still
     # worth naming, because the detector missed more incident time than it caught.
     computed["low_recall"] = bool(evaluable and not reasons
@@ -1504,20 +1524,14 @@ def alerted_rate_ratio_notice(res: dict) -> str:
     deg = res["degenerate_output"]
     ratio = res["alerted_rate_over_prevalence"]
     rate = deg["alerted_rate"]
-    if rate < ALERT_RATE_RATIO_FLOOR:
-        why = (f"Neither path of the flag-everything guard reaches it. Both of them ask the "
-               f"alerted rate to clear an absolute floor first, {ALERT_RATE_SATURATION} on "
-               f"one path and {ALERT_RATE_RATIO_FLOOR} on the other, and {_fmt(rate, 3)} is "
-               f"under both. Those floors are there so that a detector watching for rare "
-               f"incidents is not condemned for working. At a prevalence of 0.001, alerting "
-               f"on 1 percent of the time with perfect recall is excellent work and is "
-               f"still ten times prevalence.")
-    else:
-        why = (f"Neither path of the flag-everything guard reaches it. One path needs an "
-               f"alerted rate of {ALERT_RATE_SATURATION} and {_fmt(rate, 3)} is under that. "
-               f"The other accepts {ALERT_RATE_RATIO_FLOOR} but wants a ratio of "
-               f"{int(ALERT_RATE_RATIO_MULTIPLE)}, and {ratio:.1f} is under that. This run "
-               f"sits in the band between them.")
+    bar = res.get("alert_rate_bar")
+    why = (f"The flag-everything guard does not reach it. At a prevalence of "
+           f"{_fmt(res['prevalence'], 4)} the guard fires at an alerted rate of "
+           f"{_fmt(bar, 3)}, and {_fmt(rate, 3)} is under that. The bar moves with "
+           f"prevalence on purpose, so that a detector watching for rare incidents is not "
+           f"condemned for working. At a prevalence of 0.001 the bar is 0.045, and a "
+           f"detector alerting on 1 percent of the time with perfect recall is ten times "
+           f"prevalence and well clear of it.")
     return (f"Alerted far more often than anything was wrong. The detector alerted on "
             f"{rate * 100:.1f} percent of the buckets in the range while "
             f"{res['prevalence'] * 100:.1f} percent of them fall inside an incident window. "
@@ -1589,9 +1603,10 @@ def sweep_notice(sweep: dict, grid: dict, verdict: str = "UNSTABLE") -> list[str
     else:
         head = (f"UNSTABLE suppressed by --no-sweep. {shared} You passed --no-sweep, so the "
                 f"verdict above is {verdict} at the "
-                f"{fmt_bucket(grid['bucket_seconds'])} bucket you picked and the exit code "
-                f"matches that one. Without --no-sweep this run is UNSTABLE at exit 4. Read "
-                f"the verdict above as one row of the table below and not as the answer.")
+                f"{fmt_bucket(grid['bucket_seconds'])} bucket you picked. The exit code is "
+                f"still 4, which is UNSTABLE, because the flag holds the verdict text and "
+                f"is not allowed to turn a failing run into a passing exit code. Read the "
+                f"verdict above as one row of the table below and not as the answer.")
     lines = [
         head,
         "",
@@ -1891,8 +1906,9 @@ def render_report(r: dict) -> str:
         f"{_fmt(deg['alerted_rate'])}, p = {_fmt(p, 4)}"
         + (f", ratio = {res['alerted_rate_over_prevalence']:.1f}x"
            if res.get("alerted_rate_over_prevalence") else "")
-        + f" | rate >= {ALERT_RATE_SATURATION} and >= {int(ALERT_RATE_MULTIPLE)} x p, "
-        f"or rate >= {ALERT_RATE_RATIO_FLOOR} and >= {int(ALERT_RATE_RATIO_MULTIPLE)} x p | "
+        + (f", bar = {_fmt(res['alert_rate_bar'], 3)}"
+           if res.get("alert_rate_bar") is not None else "")
+        + f" | rate^2 >= {int(ALERT_RATE_PRODUCT)} x p | "
         f"{status.get('alert_rate_far_above_prevalence', 'pass')} |",
         f"| Degenerate output guard | 8 | alerted rate = {_fmt(deg['alerted_rate'])}, "
         f"distinct scores = {deg['distinct_scores'] if deg['distinct_scores'] is not None else 'n/a'} | "

@@ -1,5 +1,87 @@
 # Changelog
 
+## [1.3.0] - 2026-09-04
+
+Two independent reviewers ran v1.2.0 against the exports that had produced its defects and
+both came back with findings. Everything below came from that.
+
+### Changed
+
+- **The flag-everything guard is one continuous curve.** It fires when the alerted rate
+  squared reaches `ALERT_RATE_PRODUCT` (2) times prevalence, which is the same as saying the
+  alerted rate multiplied by its ratio to prevalence reaches 2. `ALERT_RATE_SATURATION`,
+  `ALERT_RATE_RATIO_FLOOR` and `ALERT_RATE_RATIO_MULTIPLE` are gone. `ALERT_RATE_MULTIPLE`
+  stays, and is now only the ratio worth printing, never a threshold.
+
+  The two-path shape in 1.2.0 narrowed the flat regions rather than removing them. A
+  reviewer proved through the command line that two survived: below a prevalence of 0.02 the
+  0.20 floor decided alone, and between 0.05 and 0.125 the 0.50 floor did. At a prevalence
+  of 0.002 an alerted rate of 0.1989 passed and 0.2009 excluded, both alerting roughly a
+  hundred times more often than anything was wrong, with the ratio irrelevant to the
+  outcome. The 0.05 to 0.125 stretch matters more, because that is ordinary prevalence
+  rather than a corner. Flat regions also made bucket sweeps read as unstable for a reason
+  that had nothing to do with the detector, because a rounding-level move in prevalence
+  could carry a fixed threshold past the alerted rate.
+
+  The curve passes through both anchors the threshold design had already chosen. At a
+  prevalence of 0.02 the bar is 0.20 and at 0.125 it is 0.50, exactly where the old floors
+  sat, so this is a smooth join of the existing design and not a new opinion about where the
+  bar belongs. Everywhere else it interpolates, so the ratio always binds. The ratio the bar
+  allows falls from 45 at a prevalence of 0.001 to 4 at 0.125, where the old shape allowed
+  200 at the same low end.
+
+  A perfect detector still cannot be caught, and that is now provable rather than tested. It
+  alerts exactly as often as things are anomalous, so it fires only when prevalence squared
+  reaches twice prevalence, meaning a prevalence of 2. The bar also stays stricter than the
+  baseline it exists to catch: at full recall it fires below a precision of the square root
+  of half the prevalence, which is above prevalence for every prevalence under 0.5.
+
+  The curve is stricter than the two-path shape everywhere except at the two anchors, so
+  verdicts move in one direction only. Nothing that excluded now passes. Applying it to the
+  120 archived folds changes no verdict, so `make verify`, `make verify-archive`, `make
+  smoke` and `make pilot` are byte identical. `check_result.json` gains `alert_rate_bar`,
+  the rate the detector had to stay under, and `alert_rate_path` is now `"curve"` or null.
+
+- **`--no-sweep` can no longer turn a failing run into a passing exit code.** Both reviewers
+  found this independently. The flag held the exit code as well as the reported verdict, so
+  a run that was UNSTABLE came back at the single-bucket exit code, and a continuous
+  integration job reading only that code passed and never saw the paragraph explaining why
+  the verdict was bucket-dependent. A suppressed UNSTABLE now exits 4. The flag still holds
+  the reported verdict, which is what it is for. `check_result.json` carries
+  `sweep_suppressed_unstable`, and `--help` now points at it.
+
+- **An exclusion on alert volume says that is what it is.** This guard is the one most
+  likely to fire on a real detector that finds incidents and simply costs too much to page
+  on. A reviewer built the case: prevalence 0.02, alerted rate 0.20, recall 1.000, F1 at
+  4.64 times the predict-all floor, excluded. The verdict section gave one sentence about
+  alert volume and never mentioned the lift or the recall, so an operator reading it would
+  conclude the detector does not work. When the guard fires while the detector has lift over
+  the floor or high recall, the exclusion now names both, says it is excluded on alert
+  volume and not on failing to detect, and hands the trade back as a judgement about the
+  reader's own on-call load.
+
+- **The exclusion sentence lost its nested clauses.** It had two "which is" clauses inside
+  one sentence. It now names the alerted rate, the bar at that prevalence, and the ratio.
+
+### Corrected
+
+- **A claim of measurement that cannot be supported.** The 1.2.0 entry below described a
+  detector alerting on 40 percent of a fourteen day timeline at a prevalence of 0.0397 as
+  measured. Neither production export matches it. One covers 35.7 days at prevalences of
+  0.0198 to 0.0339, the other a week at 0.043. The case is real as a construction, and it is
+  built that way in the test suite at 57 anomalous buckets of 1440, but it should not have
+  been written as a measurement. The 1.2.0 entry now carries a correction note in place, and
+  the README no longer makes the claim at all.
+
+- **The README known-limit paragraph** described floors that no longer exist. It now records
+  what the two production exports actually measured, and that the bar sits below all of it.
+
+### Fixed
+
+- The exit-code change was written against the wrong nesting level on the first attempt and
+  silently did nothing. The end-to-end test added with it caught that, which is the reason
+  it is an end-to-end test and not a unit test.
+
 ## [1.2.0] - 2026-09-04
 
 ### Changed
@@ -7,8 +89,10 @@
   which reads as two conditions and behaves as one. Four times 0.125 is 0.5, so the multiple
   is implied by the rate whenever prevalence is under 0.125, and real incident data is
   essentially never above that. The guard was really just "alerts more than half the time"
-  and the ratio never bound on anything. Measured at a prevalence of 0.0397, a detector
-  alerting on 40 percent of a fourteen day timeline is alerting 10.1 times as often as
+  and the ratio never bound on anything. ⚠️ Corrected in 1.3.0: the next sentence said this
+  case was measured, and it cannot be matched to either production export, so read it as a
+  constructed boundary case. At a prevalence of 0.0397, a detector
+  alerting on 40 percent of the timeline is alerting 10.1 times as often as
   anything was wrong, and it passed at exit 0 with the best F1 in the table. A rate of 0.499
   passed and 0.500 excluded, a step function with nothing else looking.
 

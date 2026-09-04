@@ -10,6 +10,7 @@ or
 """
 from __future__ import annotations
 
+import math
 import unittest
 from math import nan
 from pathlib import Path
@@ -22,9 +23,9 @@ import sys  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from fdes import protocol  # noqa: E402
-from fdes.checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_RATIO_FLOOR,  # noqa: E402
-                         ALERT_RATE_RATIO_MULTIPLE, ALERT_RATE_SATURATION,
-                         CSV_FIELDS, NOT_EVALUABLE, alert_rate_saturated, check_row,
+from fdes.checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_PRODUCT,  # noqa: E402
+                         CSV_FIELDS, NOT_EVALUABLE, alert_rate_bar,
+                         alert_rate_saturated, check_row,
                          checks_from_scores)
 
 # The archived IsolationForest logs fold 1 row, the one `make pilot` reproduces.
@@ -212,67 +213,72 @@ class TestAlertRateGuard(unittest.TestCase):
         self.assertTrue(alert_rate_saturated(0.9451, 0.0431))
 
     def test_a_perfect_detector_never_fires_it_at_any_prevalence(self):
-        # A perfect detector alerts exactly as often as things are anomalous.
+        # A perfect detector alerts exactly as often as things are anomalous. It fires only
+        # if p squared reaches 2p, meaning a prevalence of 2, so it cannot be caught.
         for p in (0.001, 0.043, 0.25, 0.5, 0.6, 0.9, 1.0):
             self.assertFalse(alert_rate_saturated(p, p), p)
+        self.assertEqual(ALERT_RATE_PRODUCT, 2.0)
 
     def test_a_rare_incident_detector_that_alerts_rarely_never_fires_it(self):
-        # Ten times prevalence, but only 1 percent of the wall-clock time, so it is well
-        # short of the saturation bar and keeps its verdict.
+        # Ten times prevalence, but only 1 percent of the wall-clock time. The bar at this
+        # prevalence is 0.045, so it is well clear.
         self.assertFalse(alert_rate_saturated(0.01, 0.001))
+        self.assertGreater(alert_rate_bar(0.001), 0.01)
 
-    def test_both_of_path_a_s_conditions_have_to_hold(self):
-        p = 0.1
-        just_under_the_rate = ALERT_RATE_SATURATION - 0.01
-        self.assertFalse(alert_rate_saturated(just_under_the_rate, p))
-        self.assertTrue(alert_rate_saturated(ALERT_RATE_SATURATION, p))
-        # High rate, but prevalence is high with it, so the detector is not flagging
-        # more than the data warrants.
-        self.assertFalse(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE + 0.01))
-        self.assertTrue(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE))
+    def test_the_curve_keeps_the_two_anchors_the_threshold_design_chose(self):
+        # The old shape had absolute floors of 0.20 and 0.50 with kinks at these two
+        # prevalences. The curve is the smooth join of the same two points, so this is an
+        # interpolation of the existing design and not a new opinion about where the bar is.
+        self.assertAlmostEqual(alert_rate_bar(0.020), 0.20, places=6)
+        self.assertAlmostEqual(alert_rate_bar(0.125), 0.50, places=6)
 
-    def test_path_a_s_multiple_is_inert_at_any_realistic_prevalence(self):
-        # 4 x 0.125 = 0.5, so under a prevalence of 0.125 the multiple is implied by the
-        # rate and path A collapses to "alerts more than half the time". Real incident data
-        # is essentially never above 0.125. This is why path B exists.
-        crossover = ALERT_RATE_SATURATION / ALERT_RATE_MULTIPLE
-        self.assertAlmostEqual(crossover, 0.125, places=6)
-        for p in (0.001, 0.02, 0.0397, 0.043, 0.1):
-            self.assertLess(ALERT_RATE_MULTIPLE * p, ALERT_RATE_SATURATION, p)
+    def test_there_is_no_flat_region_anywhere(self):
+        # This is the defect the two-path shape still had. A constant deciding alone means
+        # the ratio never binds inside that stretch. The bar must move at every prevalence.
+        ps = [i / 2000 for i in range(1, 800)]
+        bars = [alert_rate_bar(p) for p in ps]
+        for p, lo, hi in zip(ps[1:], bars, bars[1:]):
+            self.assertGreater(hi, lo, p)
 
-    def test_path_b_catches_the_real_case_path_a_let_through(self):
-        # Measured on the second real run. 40 percent of a fourteen day timeline alerted
-        # where 3.97 percent of it was anomalous, so 10.1 times as often as anything was
-        # wrong. Under path A alone this passed with the best F1 in the table.
-        self.assertLess(0.400, ALERT_RATE_SATURATION)
-        self.assertGreaterEqual(0.400, ALERT_RATE_RATIO_FLOOR)
-        self.assertGreaterEqual(0.400 / 0.0397, ALERT_RATE_RATIO_MULTIPLE)
+    def test_the_ratio_the_bar_allows_falls_as_prevalence_rises(self):
+        # The old shape allowed a ratio of 200 at a prevalence of 0.001, because 0.20 was
+        # an absolute floor and nothing else could reach it.
+        self.assertLess(alert_rate_bar(0.001) / 0.001, 50)
+        self.assertLess(alert_rate_bar(0.002) / 0.002, 35)
+        previous = float("inf")
+        for p in (0.001, 0.002, 0.01, 0.02, 0.05, 0.125, 0.30):
+            ratio = alert_rate_bar(p) / p
+            self.assertLess(ratio, previous, p)
+            previous = ratio
+
+    def test_the_two_cases_the_old_shape_let_through_now_fire(self):
+        # Both were measured through the command line against the two-path shape.
+        # A hundred times as often as anything was wrong, and it passed.
+        self.assertTrue(alert_rate_saturated(0.1989, 0.002))
+        # And the case where the absolute 0.5 decided alone, with the ratio inert.
+        self.assertTrue(alert_rate_saturated(0.4901, 0.079))
+
+    def test_the_case_that_drove_the_first_reshape_still_fires(self):
+        # A constructed boundary case, 40 percent alerted at a prevalence of 0.0397.
+        # It is not a measurement from anyone's production data. See the CHANGELOG note
+        # under 1.3.0 for why the earlier description of it was withdrawn.
         self.assertTrue(alert_rate_saturated(0.400, 0.0397))
 
     def test_the_step_function_at_the_old_floor_is_gone(self):
-        # 0.499 passed and 0.500 excluded, with nothing between prevalence and 0.5 making
-        # any difference. Both sides of that step now fire.
+        # 0.499 passed and 0.500 excluded under the original single condition.
         for rate in (0.499, 0.500):
             self.assertTrue(alert_rate_saturated(rate, 0.0397), rate)
 
-    def test_path_b_leaves_the_rare_incident_detector_alone(self):
-        # The case path A's absolute floor was protecting, now protected by path B's.
-        # Ten times prevalence, and a twentieth of the lower floor.
-        self.assertGreaterEqual(0.01 / 0.001, ALERT_RATE_RATIO_MULTIPLE)
-        self.assertLess(0.01, ALERT_RATE_RATIO_FLOOR)
-        self.assertFalse(alert_rate_saturated(0.01, 0.001))
+    def test_the_bar_stays_stricter_than_the_predict_all_baseline(self):
+        # At full recall the guard fires below a precision of sqrt(p / 2). That has to sit
+        # above p, which is the precision predict-all achieves, or the guard would be
+        # letting through detectors no better than flagging everything.
+        for p in (0.001, 0.01, 0.0417, 0.05, 0.125, 0.30, 0.49):
+            self.assertGreater(math.sqrt(p / 2), p, p)
 
-    def test_the_band_between_the_two_paths_keeps_its_pass(self):
-        # Over the lower floor, under the ratio the lower floor asks for, and under the
-        # absolute floor of path A. A detector alerting a third of the time at five times
-        # prevalence is not condemned here.
-        self.assertFalse(alert_rate_saturated(0.33, 0.066))
-        # And right at the ratio it is.
-        self.assertTrue(alert_rate_saturated(0.33, 0.33 / ALERT_RATE_RATIO_MULTIPLE))
-
-    def test_path_b_never_reaches_a_perfect_detector(self):
-        for p in (0.001, 0.0397, 0.25, 0.6, 0.9):
-            self.assertFalse(alert_rate_saturated(p, p), p)
+    def test_the_notice_multiple_is_not_a_guard_constant(self):
+        # It is only the ratio worth printing. It must not be read as a threshold.
+        self.assertEqual(ALERT_RATE_MULTIPLE, 4.0)
 
 
 class TestRecordedRun(unittest.TestCase):
