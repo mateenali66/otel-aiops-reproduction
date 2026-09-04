@@ -80,7 +80,14 @@ ZERO_LENGTH_DUTY_LIMIT = 0.20   # above this share of point events, duty cycle m
 # Two gates on the quantisation suppression, and they close each other's holes. See
 # run_check for why neither is enough alone.
 SUPPRESSION_MAX_LEVERAGE = 50.0        # how much of the rate the bucket may be blamed for
-SUPPRESSION_MAX_ALERTS_PER_HOUR = 1.0  # "occasional" has to mean something
+# Alert volume, measured against the incidents there were to find. This is deliberately a
+# ratio and not a rate per clock hour. An absolute clock constant produced a hard step, where
+# 720 alerts in a month passed and 726 excluded with the leverage, duty cycle, precision and
+# recall all identical, which is the same defect class the guard itself took four rounds to
+# lose. It was also an average, so clustering laundered it: three alerts in every third hour
+# averages to 0.99 an hour and pages in bursts, which is the normal shape of a flapping
+# detector rather than an exotic one.
+ALERTS_PER_INCIDENT_LIMIT = 50.0
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
@@ -563,6 +570,7 @@ def clip_to_range(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.
 
 
 DOMINANT_ALERT_SHARE = 0.30   # one alert window owning this much alerted time gets named
+DOMINANT_ALERT_MIN_ROWS = 5   # below this the share is arithmetic, not a finding
 
 
 def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
@@ -591,7 +599,10 @@ def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dic
         "dominated": False,
     }
     total = float(out["total_alert_seconds"])
-    if len(seconds) < 2 or total <= 0:
+    # With a handful of rows one of them owns most of the time by arithmetic, whatever the
+    # detector did. Two rows trip a 30 percent share whenever they are not near-identical,
+    # and three almost always do. Reported as not applicable rather than as a finding.
+    if len(seconds) < DOMINANT_ALERT_MIN_ROWS or total <= 0:
         return out
     longest = float(seconds.max())
     out["longest_row_seconds"] = int(longest)
@@ -601,19 +612,43 @@ def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dic
     return out
 
 
-def alerts_per_hour(grid: dict, starts: np.ndarray, ends: np.ndarray) -> float | None:
-    """How often this detector raises an alert, per hour of the evaluation range.
+def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
+                        i_start: np.ndarray, i_end: np.ndarray) -> float | None:
+    """How many times this detector alerted for each incident there was to find.
 
-    Counted on windows that touch the range, so an export whose rows mostly sit outside it
-    is not charged for them. This is the only quantity that separates a detector alerting
-    briefly and occasionally from one paging constantly in short bursts, because the two are
-    indistinguishable by duty cycle and the second can have the lower one.
+    Nothing else in this procedure measures alert frequency. Bucket occupancy does not,
+    because a window shorter than the bucket claims the whole bucket. The duty cycle does
+    not, because a detector paging 173 times a day in one-second bursts occupies less time
+    than one paging 6 times a day for a minute each. Two independent reviewers arrived at the
+    same conclusion from opposite directions, one by walking through the guard and one by
+    finding a clean PASS on a detector alerting 174 times a day.
+
+    A rate per clock hour was tried and was wrong twice over. It stepped, and it was an
+    average that clustering laundered. This is a ratio, so it moves with the data, and it
+    orders the known cases correctly: 31 for a detector worth keeping, 120 and 355 for two
+    that are not.
+
+    Counted on windows that touch the range, so neither file is charged for rows outside it.
     """
-    _, touches = clip_to_range(grid, starts, ends)
-    hours = float(grid["span_seconds"]) / 3600.0
-    if hours <= 0:
+    _, a_touch = clip_to_range(grid, a_start, a_end)
+    _, i_touch = clip_to_range(grid, i_start, i_end)
+    incidents = int(i_touch.sum())
+    if incidents <= 0:
         return None
-    return float(int(touches.sum())) / hours
+    return float(int(a_touch.sum())) / float(incidents)
+
+
+def alert_volume_notice(res: dict) -> str:
+    per = res["alerts_per_incident"]
+    return (f"Alerted {per:.0f} times for every incident there was to find. Nothing above "
+            f"measures that. The flag-everything guard reads how much of the timeline the "
+            f"detector occupies, and a detector that pages constantly in short bursts "
+            f"occupies very little of it, so a run can clear every check here while paging "
+            f"far more often than anyone would read. The bucket-level precision above is "
+            f"{_fmt(res['precision'], 3)}. Whether this many pages is worth it is a "
+            f"judgement about your on-call load, and this procedure does not make it. It "
+            f"reports the number so the judgement is yours and not an accident of which "
+            f"checks happen to exist.")
 
 
 def dominant_alert_notice(res: dict) -> str:
@@ -824,7 +859,7 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     # strength of a disagreement with itself.
     a_duty = duty_cycle(grid, a_start, a_end)
     i_duty = duty_cycle(grid, i_start, i_end)
-    a_per_hour = alerts_per_hour(grid, a_start, a_end)
+    a_per_inc = alerts_per_incident(grid, a_start, a_end, i_start, i_end)
     wanted = sorted({parse_duration(b) for b in SWEEP_BUCKETS} | {grid["bucket_seconds"]})
     rows, skipped = [], []
     for w in wanted:
@@ -839,7 +874,7 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
                                 truth_rows=i_note["rows"], truth_coverage=i_cov,
                                 alert_rows=a_note["rows"], alert_coverage=a_cov,
                                 alert_duty=a_duty, truth_duty=i_duty,
-                                alerts_per_hour=a_per_hour)
+                                per_incident=a_per_inc)
         rows.append({
             "bucket": fmt_bucket(w),
             "bucket_seconds": w,
@@ -1050,7 +1085,7 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
               alert_coverage: dict | None = None,
               alert_duty: float | None = None,
               truth_duty: float | None = None,
-              alerts_per_hour: float | None = None) -> tuple[dict, list[dict]]:
+              per_incident: float | None = None) -> tuple[dict, list[dict]]:
     """Apply the FDES checks to one bucketed timeline.
 
     Returns the computed values and the list of things that were not computable, each with
@@ -1206,8 +1241,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                      and truth_duty > 0.0
                      and not alert_rate_saturated(alert_duty, truth_duty)
                      and leverage is not None and leverage <= SUPPRESSION_MAX_LEVERAGE
-                     and alerts_per_hour is not None
-                     and alerts_per_hour <= SUPPRESSION_MAX_ALERTS_PER_HOUR)
+                     and per_incident is not None
+                     and per_incident <= ALERTS_PER_INCIDENT_LIMIT)
     if quantised:
         saturated = False
     # The bar the detector had to stay under, so the report can print it rather than only
@@ -1335,9 +1370,13 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["incident_duty_cycle"] = round(truth_duty, 6) if truth_duty is not None else None
     computed["alert_rate_quantised"] = quantised
     computed["alert_rate_leverage"] = round(leverage, 2) if leverage is not None else None
-    computed["alerts_per_hour"] = round(alerts_per_hour, 4) if alerts_per_hour is not None else None
+    computed["alerts_per_incident"] = round(per_incident, 2) if per_incident is not None else None
     computed["suppression_max_leverage"] = SUPPRESSION_MAX_LEVERAGE
-    computed["suppression_max_alerts_per_hour"] = SUPPRESSION_MAX_ALERTS_PER_HOUR
+    computed["alerts_per_incident_limit"] = ALERTS_PER_INCIDENT_LIMIT
+    # Nothing else here measures how often the detector pages, and a PASS can be carried by
+    # a detector alerting hundreds of times per incident without any check touching it.
+    computed["high_alert_volume"] = bool(
+        evaluable and per_incident is not None and per_incident > ALERTS_PER_INCIDENT_LIMIT)
     computed["alert_windows"] = alert_rows
     # Kept for anything reading the v1.2.0 field. There is one rule now, so it is either
     # the curve or nothing.
@@ -1347,6 +1386,11 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["low_recall"] = bool(evaluable and pm["recall"] < LOW_RECALL_NOTICE)
     computed["low_recall_notice"] = bool(computed["low_recall"] and not reasons)
     computed["low_recall_band"] = LOW_RECALL_NOTICE
+    # Both reviewers asked for this from opposite directions. One found a PASS carried by a
+    # suppressed exclusion, the other a PASS on a detector paging 174 times a day, and both
+    # said the same thing: the exit code carried none of it. A reader who only sees the code
+    # cannot tell a clean PASS from one with a caveat attached.
+    computed["pass_qualified"] = bool(quantised or computed.get("high_alert_volume"))
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
     else:
@@ -1396,7 +1440,8 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       alert_rows=a_note["rows"], alert_coverage=a_span,
                                       alert_duty=duty_cycle(grid, a_start, a_end),
                                       truth_duty=duty_cycle(grid, i_start, i_end),
-                                      alerts_per_hour=alerts_per_hour(grid, a_start, a_end))
+                                      per_incident=alerts_per_incident(
+                                          grid, a_start, a_end, i_start, i_end))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
@@ -1616,8 +1661,13 @@ def scope_assumptions(scope: dict) -> list[str]:
                 f"{scope['shared_scopes']}. "
                 f"{scope['alert_rows_on_unmatched_scopes']} of "
                 f"{scope['alert_rows_with_a_scope']} alert rows fall on a scope that "
-                f"appears in no incident. Scope is only reported. No row was filtered by "
-                f"it, so those rows are still counted as false positives."]
+                f"appears in no incident, and "
+                f"{scope['incident_rows_on_unmatched_scopes']} of "
+                f"{scope['incident_rows_with_a_scope']} incident rows sit on a scope that "
+                f"appears in no alert. The two directions fail differently. The first are "
+                f"counted as false positives and the second as false negatives, and "
+                f"neither could have come out any other way. Scope is only reported. No "
+                f"row was filtered by it."]
     if scope.get("mode") == "scores":
         risk = ("Scope was not checked, because a score series carries one row per "
                 "timestamp and has no scope column to compare against the incident file. "
@@ -2130,6 +2180,9 @@ def render_report(r: dict) -> str:
         block = dominant_incident_notice(res)
         if block:
             lines += block + [""]
+
+    if res.get("high_alert_volume"):
+        lines += [alert_volume_notice(res), ""]
 
     if res.get("alert_concentration", {}).get("dominated"):
         lines += [dominant_alert_notice(res), ""]
