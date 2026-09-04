@@ -642,7 +642,10 @@ def main() -> None:
     s.add_argument("--scope-col", default=None,
                    help="name the optional service or scope column in the alerts CSV. When "
                         "both files carry one, the report says how far the two exports "
-                        "overlap and warns when they may describe different systems.")
+                        "overlap and warns when they may describe different systems. This "
+                        "REPORTS ONLY. It never filters either file and it never changes a "
+                        "verdict, so every alert is still scored against every incident. "
+                        "Filter the exports yourself if you want scope-aware scoring.")
     s.add_argument("--incident-scope-col", default=None,
                    help="name the optional service or scope column in the incidents CSV. "
                         "Defaults to --scope-col.")

@@ -1,5 +1,87 @@
 # Changelog
 
+## [1.3.3] - 2026-09-04
+
+Two reviewers reported against 1.3.2 on the same day, one from a real Azure Monitor and
+Jira export and one adversarial. Everything here came from them.
+
+### Fixed
+
+- **The bucket sweep did not apply the quantisation suppression.** The worst of these,
+  because each half was correct on its own. The headline verdict had the suppression and the
+  sweep recomputed every row without it, so a report carried a PASS headline above a table
+  whose row for the same bucket said EXCLUDE, and then declared the run unstable on the
+  strength of a disagreement with itself. The duty cycle is a bucket-free quantity, so it is
+  now computed once and passed into every row of the ladder. This is the third time a fix
+  has been correct in one place and missing in another, and the third time only an
+  end-to-end run has shown it.
+
+- **The quantisation suppression was one row wide and abusable.** `duty_cycle` skips
+  zero-length windows and gave up only when every window was instantaneous, so a single
+  durational row defeated it. An export of 5,184 point events plus one ten minute window had
+  a duty cycle of 0.0002 while alerting on 60 percent of the buckets, which suppressed the
+  guard entirely and passed a detector paging 173 times a day at a precision of 0.014. The
+  claim in 1.3.2 was that long windows keep the duty cycle close to the bucketed rate so the
+  escape could not open. That was right and beside the point: short windows open it, and
+  zero-length ones open it completely, because they contribute nothing to the numerator
+  while still occupying a bucket and still paging. Above `ZERO_LENGTH_DUTY_LIMIT` (0.20) of
+  in-range rows being zero-length, the duty cycle describes a subset rather than the
+  detector, so there is nothing to compare against and the guard stands. A mixed export of
+  instantaneous and durational rows is ordinary, not exotic: this tool's own documentation
+  says Splunk often has no end time.
+
+- **The scope overlap check only ever looked at one side.** It tested unmatched alert rows
+  against the threshold while the unmatched incident count was computed on the line above
+  and thrown away. The two sides fail in opposite directions. Alerts on a scope with no
+  incident are guaranteed false positives, and incidents on a scope no alert covers are
+  guaranteed false negatives. On a real export 74 percent of incidents sat in the second
+  case and nothing was said. `poor_alert_overlap` and `poor_incident_overlap` are now
+  separate, `poor_overlap` is either of them, and the incident direction has its own notice
+  saying that recall and F1 are measuring which services the alert export covers.
+
+- **`low_recall` and `alerted_rate_ratio_high` reported false in the JSON when they were
+  true.** Both folded "is this true" together with "should this be printed", so a run that
+  already had an exclusion reason recorded `low_recall` as false while recall was 0.029.
+  Anything reading the JSON drew the opposite conclusion from the run. The fact is now the
+  fact, and the decision to print prose is a separate field with `_notice` in its name.
+
+### Added
+
+- **A dominant alert window check.** There has been one for a dominant incident row since
+  the tool met its first real export, and none on the alert side, even though the alerted
+  rate is what the flag-everything guard reads. On a real export a single still-firing alert
+  drove 40 percent of the alerted rate out of eight rows, unflagged. Above
+  `DOMINANT_ALERT_SHARE` (0.30) of alerted time in one window, the report names it and says
+  the usual cause is an alert that was still firing when the export was taken.
+
+- **The tool version in the report.** Only the specification version was printed, so a
+  report could not be traced back to the build that made it. They are different things. A
+  test asserts `TOOL_VERSION` matches `CITATION.cff`, so the two cannot drift.
+
+- **A caution where the report quotes scope names.** The scope notices echo names out of the
+  user's own files, and on some platforms those carry account or subscription identifiers.
+  The notice now says to read the report before pasting it into a ticket.
+
+### Changed
+
+- **`--scope-col` help says it never filters.** A reviewer had to work out by experiment
+  whether it filters or only reports. It reports. The help now says so in those words.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 205 tests pass.
+
+### Still open
+
+- No guidance for an alert that is still firing at query time. A reviewer had to invent a
+  censoring rule. The new dominant-alert notice names the symptom but the tool still does
+  not say what to do about an unresolved row in general.
+- No warning when summed incident-window time exceeds the observation range, which happened
+  at 3.6 times on one real export. The overlap fraction is reported and the multiple is not.
+- `--bucket` default-to-median-spacing in scores mode is undocumented for irregular series.
+
 ## [1.3.2] - 2026-09-04
 
 ### Fixed

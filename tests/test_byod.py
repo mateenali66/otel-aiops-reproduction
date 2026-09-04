@@ -494,6 +494,62 @@ class TestAlertRateCurve(TempCase):
             self.assertEqual(r["verdict"], "EXCLUDE", bucket)
             self.assertFalse(r["results"]["alert_rate_quantised"], bucket)
 
+    def test_the_sweep_applies_the_suppression_too(self):
+        # The sweep recomputed every row without the quantisation suppression, so the report
+        # carried a PASS headline above a table whose row for the same bucket said EXCLUDE,
+        # and declared the run unstable on the strength of a disagreement with itself. Only
+        # an end-to-end run shows this, because each half is correct on its own.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = [(t0 + _dt.timedelta(days=5 * k, hours=10),
+                t0 + _dt.timedelta(days=5 * k, hours=11)) for k in range(6)]
+        al = list(inc)
+        for day in range(30):
+            for j in range(6):
+                st = t0 + _dt.timedelta(days=day, hours=2 + j * 2)
+                al.append((st, st + _dt.timedelta(minutes=1)))
+        incidents = write(self.tmp, "sw_i.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "sw_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        r = byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end))
+        sweep = r["results"]["bucket_sweep"]
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertFalse(sweep["unstable"])
+        rows = sweep.get("buckets") or sweep.get("rows")
+        for row in rows:
+            self.assertEqual(row["verdict"], "PASS", row["bucket"])
+
+    def test_point_events_cannot_buy_their_way_out_of_the_guard(self):
+        # The suppression is a way out of an exclusion, so it has to be narrow. It compares
+        # the bucketed rate against a duty cycle, and the duty cycle skips zero-length rows.
+        # An export of thousands of point events plus one durational window therefore had a
+        # duty cycle near zero while alerting on 60 percent of the buckets, which suppressed
+        # the guard and passed a detector paging 173 times a day. Above
+        # ZERO_LENGTH_DUTY_LIMIT the duty cycle describes a subset rather than the detector,
+        # so there is nothing to compare against and the guard stands.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = [(t0 + _dt.timedelta(days=5 * k, hours=10),
+                t0 + _dt.timedelta(days=5 * k, hours=11)) for k in range(6)]
+        al = [(t0 + _dt.timedelta(minutes=m * 5),) * 2 for m in range(5184)]
+        al.append((t0 + _dt.timedelta(days=20), t0 + _dt.timedelta(days=20, minutes=10)))
+        incidents = write(self.tmp, "ab_i.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "ab_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        r = byod.check_alerts(alerts, incidents, "1h", t_from=iso(t0), t_to=iso(end),
+                              sweep=False)
+        res = r["results"]
+        self.assertGreater(res["degenerate_output"]["alerted_rate"], 0.5)
+        self.assertIsNone(res["alert_duty_cycle"])
+        self.assertFalse(res["alert_rate_quantised"])
+        self.assertEqual(r["verdict"], "EXCLUDE")
+
     def test_the_step_at_the_old_floor_is_gone(self):
         # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
         for buckets in (719, 720):
@@ -551,6 +607,89 @@ class TestAlertRateCurve(TempCase):
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
             self.assertIn("Verdict: **EXCLUDE**", p.stdout)
             self.assertIn("10 times as often as anything was wrong", p.stdout)
+
+
+class TestReportedDefects(TempCase):
+    """Four defects reported against v1.3.2 from a real Azure Monitor and Jira export."""
+
+    def test_the_tool_version_is_in_the_report_and_matches_the_citation_file(self):
+        # A report that names only the specification version cannot be traced back to the
+        # build that made it. The two versions are different things.
+        from fdes import TOOL_VERSION
+        cff = (ROOT / "CITATION.cff").read_text()
+        declared = [l.split(":", 1)[1].strip() for l in cff.splitlines()
+                    if l.startswith("version:")]
+        self.assertEqual(declared, [TOOL_VERSION])
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n", sweep=False)
+        self.assertEqual(r["tool_version"], TOOL_VERSION)
+        self.assertIn(f"otel-aiops-reproduction v{TOOL_VERSION}", byod.render_report(r))
+
+    def test_the_scope_overlap_check_looks_at_both_sides(self):
+        # It only ever tested the alert side, while the incident side was computed on the
+        # line above and thrown away. On a real export 74 percent of incidents sat on a
+        # scope no alert covered, a guaranteed false-negative direction, and it said nothing.
+        incidents = write(self.tmp, "two_sided_i.csv",
+                          "start,end,service\n"
+                          "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,api\n"
+                          "2026-03-01T08:00:00Z,2026-03-01T09:00:00Z,billing\n"
+                          "2026-03-01T12:00:00Z,2026-03-01T13:00:00Z,search\n"
+                          "2026-03-01T16:00:00Z,2026-03-01T17:00:00Z,auth\n")
+        alerts = write(self.tmp, "two_sided_a.csv",
+                       "start,end,service\n"
+                       "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,api\n"
+                       "2026-03-01T06:00:00Z,2026-03-01T06:30:00Z,api\n")
+        r = byod.check_alerts(alerts, incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              scope_col="service", sweep=False)
+        sc = r["results"]["scope"]
+        self.assertFalse(sc["poor_alert_overlap"])
+        self.assertTrue(sc["poor_incident_overlap"])
+        self.assertTrue(sc["poor_overlap"])
+        report = byod.render_report(r)
+        self.assertIn("Scope mismatch, incident side", report)
+        self.assertIn("75.0 percent", report)
+        self.assertIn("false negative", report)
+        # It quotes names out of the user's own files, which on some platforms carry account
+        # identifiers, so the report says so before anyone pastes it into a ticket.
+        self.assertIn("before pasting it into a ticket", report)
+
+    def test_one_still_firing_alert_that_owns_the_alerted_time_is_named(self):
+        # There was a dominant-incident-row check and no equivalent on the alert side, even
+        # though the alerted rate is what the flag-everything guard reads. One unresolved row
+        # can carry a verdict by itself.
+        alerts = write(self.tmp, "dom_a.csv",
+                       "start,end\n"
+                       "2026-03-01T02:00:00Z,2026-03-01T02:10:00Z\n"
+                       "2026-03-01T04:00:00Z,2026-03-01T04:10:00Z\n"
+                       "2026-03-01T06:00:00Z,2026-03-01T14:00:00Z\n")
+        r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              sweep=False)
+        a = r["results"]["alert_concentration"]
+        self.assertTrue(a["dominated"])
+        self.assertGreater(a["longest_row_share_of_alert_time"], 0.9)
+        report = byod.render_report(r)
+        self.assertIn("One alert window owns most of the alerted time", report)
+        self.assertIn("still firing when the export was taken", report)
+
+    def test_an_even_spread_of_alerts_is_not_called_dominated(self):
+        alerts = write(self.tmp, "even_a.csv",
+                       "start,end\n"
+                       "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                       "2026-03-01T06:00:00Z,2026-03-01T07:00:00Z\n"
+                       "2026-03-01T10:00:00Z,2026-03-01T11:00:00Z\n"
+                       "2026-03-01T14:00:00Z,2026-03-01T15:00:00Z\n")
+        r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                              sweep=False)
+        self.assertFalse(r["results"]["alert_concentration"]["dominated"])
+        self.assertNotIn("One alert window owns", byod.render_report(r))
+
+    def test_scope_col_help_says_it_never_filters(self):
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--help"],
+            cwd=ROOT, capture_output=True, text=True)
+        # argparse re-wraps help text, so compare on collapsed whitespace.
+        flat = " ".join(p.stdout.split())
+        self.assertIn("REPORTS ONLY", flat)
+        self.assertIn("never changes a verdict", flat)
 
 
 class TestNoMinimumRecall(TempCase):
@@ -614,7 +753,10 @@ class TestNoMinimumRecall(TempCase):
         r = self.alerts("2026-03-01T05:00:00Z,2026-03-01T11:00:00Z\n")
         self.assertEqual(r["verdict"], "EXCLUDE")
         self.assertLess(r["results"]["recall"], byod.LOW_RECALL_NOTICE)
-        self.assertFalse(r["results"]["low_recall"])
+        # Same split. Recall really is thin, so low_recall is true, and only the notice is
+        # held back because the exclusion reasons already say what went wrong.
+        self.assertTrue(r["results"]["low_recall"])
+        self.assertFalse(r["results"]["low_recall_notice"])
         self.assertNotIn("Thin recall", byod.render_report(r))
 
     def test_a_run_that_cannot_be_evaluated_gets_no_notice(self):
@@ -764,7 +906,11 @@ class TestAlertedRateRatio(TempCase):
         res = r["results"]
         self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertGreater(res["alerted_rate_over_prevalence"], byod.RATIO_NOTICE_MULTIPLE)
-        self.assertFalse(res["alerted_rate_ratio_high"])
+        # The fact is true and the JSON says so. Only the prose is suppressed. These used to
+        # be one field, so a run with an exclusion reported the ratio as not high when it
+        # was, and anything reading the JSON drew the opposite conclusion from the run.
+        self.assertTrue(res["alerted_rate_ratio_high"])
+        self.assertFalse(res["alerted_rate_ratio_notice"])
         self.assertNotIn("Alerted far more often", byod.render_report(r))
         self.assertIn("22 times as often", " ".join(res["exclusion_reasons"]))
 

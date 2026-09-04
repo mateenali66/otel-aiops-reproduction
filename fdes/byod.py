@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import SPEC_VERSION
+from . import SPEC_VERSION, TOOL_VERSION
 from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_PRODUCT, DEGENERATE_AUC,
                      DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE, RANDOM_AUC_REFERENCE,
                      RECALL_SATURATION, alert_rate_bar, alert_rate_saturated,
@@ -76,6 +76,7 @@ OVERLAP_NOTICE = 0.10
 # verdict there turns on a rounding-level difference and it moves with the bucket size.
 NEAR_FLOOR_BAND = 0.20
 NEAR_BAR_BAND = 0.10    # an exclusion this close to the bar says so, see the reason text
+ZERO_LENGTH_DUTY_LIMIT = 0.20   # above this share of point events, duty cycle means nothing
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
@@ -457,11 +458,21 @@ def duty_cycle(grid: dict, starts: np.ndarray, ends: np.ndarray) -> float | None
     a = np.clip(np.asarray(starts, dtype=np.int64), lo, hi)
     b = np.clip(np.asarray(ends, dtype=np.int64), lo, hi)
     keep = b > a
+    zero_length = int((~keep).sum())
     a, b = a[keep], b[keep]
     if not len(a):
         # Every window is instantaneous. That is a real shape, and its duty cycle is zero
         # rather than unknown, but zero would make every comparison below trivially true,
         # so it is reported as not measurable instead.
+        return None
+    # The dangerous case is a mixture. A duty cycle computed from the durational rows alone
+    # says nothing about the instantaneous ones, and instantaneous rows still occupy a bucket
+    # and still page. An export of 5,184 point events plus one ten minute window produced a
+    # duty cycle of 0.0002 while alerting on 60 percent of the buckets, which was enough to
+    # suppress the guard entirely and pass a detector paging 173 times a day. Below the
+    # threshold the duty cycle is a measurement of a subset, not of the detector, and this
+    # returns nothing rather than something misleading.
+    if zero_length / float(zero_length + len(a)) >= ZERO_LENGTH_DUTY_LIMIT:
         return None
     order = np.argsort(a, kind="stable")
     a, b = a[order], b[order]
@@ -545,6 +556,59 @@ def clip_to_range(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.
     touches = (raw_s < t1) & ((raw_e > t0) | (raw_s >= t0))
     seconds = np.where(touches & (seconds <= 0), 1, seconds)
     return seconds, touches
+
+
+DOMINANT_ALERT_SHARE = 0.30   # one alert window owning this much alerted time gets named
+
+
+def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
+    """Find a single alert window that owns most of the alerted time.
+
+    There has been a check for a dominant incident row since the tool met its first real
+    export, because a forgotten ticket moves prevalence and the floor and never shows up in
+    the numbers. The alert side has exactly the same failure and had no check at all. On one
+    real Azure export a single still-firing alert drove 40 percent of the alerted rate out of
+    eight rows, and the alerted rate is what the flag-everything guard reads, so one
+    unresolved row can carry a verdict on its own.
+
+    A still-open alert is the usual cause. An export taken while an alert is firing has no
+    end time, or an end time of now, and either way it covers everything up to the moment of
+    the query. Nothing is dropped here. The share is reported and the user decides.
+    """
+    seconds, touches = clip_to_range(grid, starts, ends)
+    seconds = seconds[touches]
+    out = {
+        "rows_in_range": int(len(seconds)),
+        "total_alert_seconds": int(seconds.sum()) if len(seconds) else 0,
+        "longest_row_seconds": None,
+        "longest_row_share_of_alert_time": None,
+        "longest_row_share_of_range": None,
+        "share_threshold": DOMINANT_ALERT_SHARE,
+        "dominated": False,
+    }
+    total = float(out["total_alert_seconds"])
+    if len(seconds) < 2 or total <= 0:
+        return out
+    longest = float(seconds.max())
+    out["longest_row_seconds"] = int(longest)
+    out["longest_row_share_of_alert_time"] = round(longest / total, 4)
+    out["longest_row_share_of_range"] = round(longest / float(grid["span_seconds"]), 4)
+    out["dominated"] = bool(longest / total >= DOMINANT_ALERT_SHARE)
+    return out
+
+
+def dominant_alert_notice(res: dict) -> str:
+    a = res["alert_concentration"]
+    return (f"One alert window owns most of the alerted time. The longest of the "
+            f"{a['rows_in_range']} alert rows in range covers "
+            f"{a['longest_row_share_of_alert_time'] * 100:.1f} percent of all alerted time, "
+            f"and {a['longest_row_share_of_range'] * 100:.1f} percent of the whole range. "
+            f"The alerted rate is what the flag-everything guard reads, so on this input one "
+            f"row is close to deciding the verdict by itself. The usual cause is an alert "
+            f"that was still firing when the export was taken, which has no end and so "
+            f"covers everything up to the moment of the query. Check that row. If it is "
+            f"still open, either cut the range to end before it started or give it an end "
+            f"time you can defend, and say which you did.")
 
 
 def incident_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
@@ -669,13 +733,23 @@ def scope_overlap(grid: dict, a_starts: np.ndarray, a_ends: np.ndarray, a_scopes
         "shared_scopes": len(shared),
         "shared_scope_names": sorted(shared)[:20],
         "alert_scopes_with_no_incident": sorted(a_set - i_set)[:20],
+        "incident_scopes_with_no_alert": sorted(i_set - a_set)[:20],
         "alert_rows_on_unmatched_scopes": unmatched_alerts,
         "incident_rows_on_unmatched_scopes": unmatched_incidents,
         "unmatched_alert_row_share": round(unmatched_alerts / len(a_rows), 4) if a_rows else None,
         "unmatched_incident_row_share": round(unmatched_incidents / len(i_rows), 4) if i_rows else None,
         "poor_overlap_threshold": SCOPE_OVERLAP_POOR,
     })
-    out["poor_overlap"] = bool(a_rows and unmatched_alerts / len(a_rows) >= SCOPE_OVERLAP_POOR)
+    # This used to look at the alert side only, while the incident side was computed on the
+    # line above and thrown away. The two sides fail in opposite directions and both matter.
+    # Alerts on a scope with no incident are guaranteed false positives. Incidents on a scope
+    # no alert covers are guaranteed false negatives, and on one real Azure export 74 percent
+    # of incidents sat there while this flag stayed silent.
+    out["poor_alert_overlap"] = bool(
+        a_rows and unmatched_alerts / len(a_rows) >= SCOPE_OVERLAP_POOR)
+    out["poor_incident_overlap"] = bool(
+        i_rows and unmatched_incidents / len(i_rows) >= SCOPE_OVERLAP_POOR)
+    out["poor_overlap"] = bool(out["poor_alert_overlap"] or out["poor_incident_overlap"])
 
     # Both sides name something and they share nothing. The share of unmatched alert rows is
     # 1.0 here whatever the detector did, so it is not a measurement of anything, and the
@@ -724,6 +798,13 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     are compared: an INSUFFICIENT row says there was nothing to measure at that bucket, not
     that the answer flipped, so it is listed and left out of the comparison.
     """
+    # The duty cycle is a bucket-free quantity, so it is the same for every row of the
+    # ladder and is computed once. It has to be passed in, because without it every row was
+    # recomputed with the quantisation suppression missing. That put a PASS headline above a
+    # table whose row for the same bucket said EXCLUDE, and declared the run unstable on the
+    # strength of a disagreement with itself.
+    a_duty = duty_cycle(grid, a_start, a_end)
+    i_duty = duty_cycle(grid, i_start, i_end)
     wanted = sorted({parse_duration(b) for b in SWEEP_BUCKETS} | {grid["bucket_seconds"]})
     rows, skipped = [], []
     for w in wanted:
@@ -736,7 +817,8 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
         truth, i_cov = mark_windows(g, i_start, i_end)
         computed, _ = run_check(mode="alerts", y=truth, pred=alerted, scores=None,
                                 truth_rows=i_note["rows"], truth_coverage=i_cov,
-                                alert_rows=a_note["rows"], alert_coverage=a_cov)
+                                alert_rows=a_note["rows"], alert_coverage=a_cov,
+                                alert_duty=a_duty, truth_duty=i_duty)
         rows.append({
             "bucket": fmt_bucket(w),
             "bucket_seconds": w,
@@ -1188,9 +1270,15 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # When the rate is a bucketing artefact the quantisation notice above already gives the
     # ratio and says why it cannot be read at face value. Printing the ordinary ratio notice
     # underneath it would state the opposite about the same number.
+    # These two used to fold "is this true" together with "should this be printed". A run
+    # that already had an exclusion reason reported low_recall false while recall was 0.029,
+    # so anything reading the JSON downstream drew the opposite conclusion from the run. The
+    # fact is now recorded as the fact, and the decision about whether to print prose is a
+    # separate field with _notice in its name.
     computed["alerted_rate_ratio_high"] = bool(
-        evaluable and not saturated and not quantised
-        and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
+        evaluable and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
+    computed["alerted_rate_ratio_notice"] = bool(
+        computed["alerted_rate_ratio_high"] and not saturated and not quantised)
     computed["alert_rate_bar"] = round(rate_bar, 4) if rate_bar is not None else None
     computed["alert_duty_cycle"] = round(alert_duty, 6) if alert_duty is not None else None
     computed["incident_duty_cycle"] = round(truth_duty, 6) if truth_duty is not None else None
@@ -1201,8 +1289,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alert_rate_path"] = "curve" if saturated else None
     # There is no minimum recall, on purpose. A PASS carried by precision alone is still
     # worth naming, because the detector missed more incident time than it caught.
-    computed["low_recall"] = bool(evaluable and not reasons
-                                  and pm["recall"] < LOW_RECALL_NOTICE)
+    computed["low_recall"] = bool(evaluable and pm["recall"] < LOW_RECALL_NOTICE)
+    computed["low_recall_notice"] = bool(computed["low_recall"] and not reasons)
     computed["low_recall_band"] = LOW_RECALL_NOTICE
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
@@ -1253,6 +1341,7 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       alert_rows=a_note["rows"], alert_coverage=a_span,
                                       alert_duty=duty_cycle(grid, a_start, a_end),
                                       truth_duty=duty_cycle(grid, i_start, i_end))
+    computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
         grid, i_start, i_end, computed["incident_concentration"]["long_row_indices"])
@@ -1504,6 +1593,7 @@ def assemble(mode: str, grid: dict, computed: dict, not_computed: list[dict],
              inputs: dict, coverage: dict, assumptions: list[str]) -> dict:
     return {
         "spec": f"FDES v{SPEC_VERSION}",
+        "tool_version": TOOL_VERSION,
         "path": "bring your own data",
         "mode": mode,
         "verdict": computed["verdict"],
@@ -1873,6 +1963,34 @@ def empty_intersection_notice(scope: dict) -> str:
             f"incident title, and run this again.")
 
 
+SCOPE_ECHO_CAUTION = (
+    " This paragraph quotes scope names out of your own files. On some platforms those "
+    "carry account or subscription identifiers, so read the report before pasting it into "
+    "a ticket.")
+
+
+def incident_overlap_notice(scope: dict) -> str:
+    """The other direction, and it fails the other way.
+
+    Alerts on a scope with no incident are guaranteed false positives. Incidents on a scope
+    no alert covers are guaranteed false negatives: nothing in the alert file could ever have
+    caught them, so recall is measuring the export rather than the detector.
+    """
+    unmatched = scope["incident_rows_on_unmatched_scopes"]
+    total = scope["incident_rows_with_a_scope"]
+    names = scope.get("incident_scopes_with_no_alert") or []
+    examples = ", ".join(f"`{s}`" for s in names[:5])
+    return (f"Scope mismatch, incident side. {unmatched} of {total} incident rows "
+            f"({unmatched / total * 100:.1f} percent) sit on a scope that appears in no "
+            f"alert"
+            + (f", for example {examples}" if examples else "")
+            + f". The detector was never given anything on those scopes, so it could not "
+            f"have caught them and every one was scored as a false negative. Recall and F1 "
+            f"are measuring which services the alert export covers, not how well the "
+            f"detector works. Either widen the alert export to cover the same services, or "
+            f"drop those incidents and say so." + SCOPE_ECHO_CAUTION)
+
+
 def scope_notice(scope: dict) -> list[str]:
     """What to say when most alert rows fall on a scope with no incident.
 
@@ -1885,6 +2003,11 @@ def scope_notice(scope: dict) -> list[str]:
         return namespace_notice(scope)
     if scope.get("empty_intersection"):
         return [empty_intersection_notice(scope)]
+    out = []
+    if scope.get("poor_incident_overlap"):
+        out.append(incident_overlap_notice(scope))
+    if not scope.get("poor_alert_overlap"):
+        return out
     unmatched = scope["alert_rows_on_unmatched_scopes"]
     total = scope["alert_rows_with_a_scope"]
     examples = ", ".join(f"`{s}`" for s in scope["alert_scopes_with_no_incident"][:5])
@@ -1894,7 +2017,8 @@ def scope_notice(scope: dict) -> list[str]:
             f"anything in the incident file, and every one of them was scored as a false "
             f"positive. The two files may be describing different systems, and if they are, "
             f"precision, F1 and the verdict are all measuring that rather than the "
-            f"detector. Filter both exports to the scopes they share and run this again."]
+            f"detector. Filter both exports to the scopes they share and run this again."
+            + SCOPE_ECHO_CAUTION]
 
 
 def render_report(r: dict) -> str:
@@ -1911,6 +2035,10 @@ def render_report(r: dict) -> str:
 
     lines = [
         f"# {r['spec']} check report: your own data ({r['mode']} mode)",
+        "",
+        f"Produced by otel-aiops-reproduction v{r.get('tool_version', 'unknown')}. The "
+        f"specification version and the tool version are different things, and a report "
+        f"that names only the first cannot be traced back to the build that made it.",
         "",
         f"Verdict: **{r['verdict']}**",
         "",
@@ -1947,16 +2075,19 @@ def render_report(r: dict) -> str:
         if block:
             lines += block + [""]
 
+    if res.get("alert_concentration", {}).get("dominated"):
+        lines += [dominant_alert_notice(res), ""]
+
     if res.get("scope", {}).get("poor_overlap"):
         lines += scope_notice(res["scope"]) + [""]
 
     if res.get("alert_rate_quantised"):
         lines += [quantisation_notice(res, grid), ""]
 
-    if res.get("alerted_rate_ratio_high"):
+    if res.get("alerted_rate_ratio_notice"):
         lines += [alerted_rate_ratio_notice(res), ""]
 
-    if res.get("low_recall"):
+    if res.get("low_recall_notice"):
         lines += [low_recall_notice(res), ""]
 
     if res.get("near_floor"):
