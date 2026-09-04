@@ -624,6 +624,41 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("usage error, not a verdict", p.stderr)
         self.assertNotEqual(p.returncode, VERDICT_EXIT_EXCLUDE)
 
+    def test_the_denominator_does_not_move_with_the_bucket_you_picked(self):
+        # The first version of the merge used the bucket size as its gap tolerance, on the
+        # reasoning that the caller had already chosen that number. That made a count of
+        # incidents depend on a bucket, which is the wrong category: prevalence is a
+        # bucket-level rate and should move with the bucket, and how many incidents there
+        # were is a fact about the world and should not. Twelve rows counted as twelve
+        # stretches at 5m and six at 1h, doubling alerts per incident on bucket size alone.
+        # The sweep computes this once and applies it to every row, so the whole sweep table
+        # moved with the bucket the user passed, which destroys what the sweep is for.
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
+        end = t0 + _dt.timedelta(days=30)
+        iso = lambda x: x.isoformat().replace("+00:00", "Z")
+        inc = []
+        for k in range(6):
+            base = t0 + _dt.timedelta(days=4 * k + 2)
+            inc.append((base, base + _dt.timedelta(minutes=5)))
+            second = base + _dt.timedelta(seconds=1800)
+            inc.append((second, second + _dt.timedelta(minutes=5)))
+        al = [(t0 + _dt.timedelta(minutes=m * 70),
+               t0 + _dt.timedelta(minutes=m * 70, seconds=72)) for m in range(588)]
+        incidents = write(self.tmp, "spaced_i.csv",
+                          "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in inc))
+        alerts = write(self.tmp, "spaced_a.csv",
+                       "start,end\n" + "".join(f"{iso(a)},{iso(b)}\n" for a, b in al))
+        seen = []
+        for bucket in ("5m", "1h"):
+            r = byod.check_alerts(alerts, incidents, bucket, t_from=iso(t0), t_to=iso(end))
+            sweep = r["results"]["bucket_sweep"]
+            rows = sweep.get("buckets") or sweep.get("rows")
+            seen.append((r["results"]["alerts_per_incident"],
+                         tuple(x["verdict"] for x in rows)))
+        self.assertEqual(seen[0], seen[1], "the sweep moved with the bucket that was passed")
+        self.assertEqual(len(inc), 12)
+
     def test_the_denominator_does_not_move_with_how_the_tracker_wrote_its_rows(self):
         # Row count is a formatting property of an export, not a fact about the world. One
         # outage is one row to one tracker, one row per affected service to another, and one
@@ -2152,7 +2187,12 @@ class TestRankMetricRefusal(TempCase):
         self.assertGreater(res["auc_roc"], 0.9)
         self.assertGreater(res["pr_auc"], 0.5)
         self.assertIsNotNone(res["vus_pr"])
-        self.assertEqual(r["not_computed"], [])
+        # Rank metrics are all present. The only thing scores mode cannot compute is alert
+        # volume, because a score series has no discrete alert windows to count, and that is
+        # stated rather than left silent.
+        titles = [x["title"] for x in r["not_computed"]]
+        self.assertEqual(titles, ["Alert volume, meaning how often the detector would page"])
+        self.assertIn("alerts_per_incident", r["not_computed"][0]["metrics"])
         self.assertEqual(r["verdict"], "PASS")
 
     def test_a_score_below_chance_fires_section_8a(self):

@@ -613,7 +613,7 @@ def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dic
 
 
 def merged_stretches(grid: dict, starts: np.ndarray, ends: np.ndarray,
-                     gap_seconds: int) -> int:
+                     gap_seconds: int = 0) -> int:
     """How many separate stretches these windows cover, after joining ones that touch.
 
     Row count is a formatting property of an export, not a fact about the world. One outage
@@ -624,10 +624,24 @@ def merged_stretches(grid: dict, starts: np.ndarray, ends: np.ndarray,
     incident from 355 to 17.75 with prevalence, alerted rate, recall, precision, F1 and both
     duty cycles all identical to the last decimal.
 
-    Windows closer together than gap_seconds are treated as one stretch. The gap defaults to
-    the bucket size, which the caller has already chosen, so this adds no constant of its
-    own. It is a statement about the shape of the ground truth rather than about detector
-    quality.
+    Only windows that touch or overlap are joined. The gap tolerance is zero, and that is a
+    correction rather than a default.
+
+    It was first written as the bucket size, on the reasoning that the caller had already
+    chosen that number so it added no constant of its own. That was wrong, and it broke the
+    bucket sweep. How many incidents there were is a fact about the world. Prevalence depends
+    on the bucket because it is defined as a bucket-level rate, and a count of incidents is
+    not. With a bucket-linked tolerance the same twelve incident rows counted as twelve
+    stretches at a five minute bucket and six at an hourly one, so alerts per incident
+    doubled on bucket size alone. Worse, the sweep computes this once and applies it to every
+    row of the ladder, so the whole sweep table moved with the bucket the user happened to
+    pass. The sweep exists to answer whether a verdict is a property of the detector or of
+    the chosen bucket, and it was answering with a table that depended on the chosen bucket.
+
+    Zero costs nothing. Measured on the case that motivated merging at all, the same two
+    outages written as forty rows collapse to two stretches at every tolerance from zero to
+    an hour. The bucket-linked value bought nothing that zero does not, and it bought bucket
+    dependence.
     """
     lo, hi = int(grid["t_from"]), int(grid["t_to"])
     if not len(starts):
@@ -669,7 +683,7 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
     Counted on windows that touch the range, so neither file is charged for rows outside it.
     """
     _, a_touch = clip_to_range(grid, a_start, a_end)
-    incidents = merged_stretches(grid, i_start, i_end, int(grid["bucket_seconds"]))
+    incidents = merged_stretches(grid, i_start, i_end)
     if incidents <= 0:
         return None
     return float(int(a_touch.sum())) / float(incidents)
@@ -690,8 +704,12 @@ def alert_volume_notice(res: dict) -> str:
     inc = res.get("incident_stretches")
     rate = (f" That is {day:.0f} alert windows a day, or about {day / 3:.0f} in an eight "
             f"hour shift." if day else "")
+    raw = res.get("incident_rows_supplied")
+    from_rows = (f", merged from the {raw} rows you supplied" if raw and inc and raw != inc
+                 else "")
     return (f"Alerted {per:.0f} times for every incident there was to find, "
-            f"{windows} windows against {inc} separate incident stretches.{rate} Nothing "
+            f"{windows} windows against {inc} separate incident stretches{from_rows}.{rate} "
+            f"Nothing "
             f"above measures that. The flag-everything guard reads how much of the timeline "
             f"the detector occupies, and a detector that pages constantly in short bursts "
             f"occupies very little of it, so a run can clear every check here while paging "
@@ -703,9 +721,18 @@ def alert_volume_notice(res: dict) -> str:
             f"measured per bucket and is not the fraction of pages that were worth reading. "
             f"With {windows} windows and {inc} incident stretches, at most {inc} of those "
             f"windows can be the first page for a real incident.\n\n"
+            f"The denominator moves with how long you assume an incident lasted. Measured on "
+            f"one real export, capping incident windows at an hour against leaving them "
+            f"uncapped moved this ratio by a factor of seventeen, while the decision to "
+            f"report it or not stayed the same at every setting. So read the flag and do not "
+            f"quote the number to two figures.\n\n"
             f"Whether this many pages is worth it is a judgement about your on-call load, "
-            f"and this procedure does not make it. It reports the numbers so the judgement "
-            f"is yours and not an accident of which checks happen to exist.")
+            f"and this procedure does not make it. The limit that triggered this is a floor "
+            f"against absurdity and not a quality threshold. A run at {per:.0f} and a run at "
+            f"{ALERTS_PER_INCIDENT_LIMIT:.0f} are not meaningfully different from each "
+            f"other, and neither is a verdict about whether the detector is any good. What "
+            f"the limit catches is the far end, where a detector alerts hundreds or "
+            f"thousands of times per incident, and that is not a judgement call.")
 
 
 def dominant_alert_notice(res: dict) -> str:
@@ -919,7 +946,7 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     a_per_inc = alerts_per_incident(grid, a_start, a_end, i_start, i_end)
     _, a_touch_sw = clip_to_range(grid, a_start, a_end)
     a_per_day = float(int(a_touch_sw.sum())) / max(1e-9, float(grid["span_seconds"]) / 86400.0)
-    i_stretch = merged_stretches(grid, i_start, i_end, int(grid["bucket_seconds"]))
+    i_stretch = merged_stretches(grid, i_start, i_end)
     wanted = sorted({parse_duration(b) for b in SWEEP_BUCKETS} | {grid["bucket_seconds"]})
     rows, skipped = [], []
     for w in wanted:
@@ -1237,6 +1264,25 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                        "in scores mode, and it is not evidence that section 8a would have "
                        "been passed.")})
 
+    if mode == "scores":
+        # Raised by a reviewer, with a complication they raised too. There are no discrete
+        # alert windows in a score series, so there is nothing to count. Threshold
+        # up-crossings would be the equivalent, and in tuned-threshold runs the threshold is
+        # fitted to maximise F1 on the same data, so a count derived from it would be
+        # optimistic in exactly the way the tuned-operating-point caveat already describes.
+        # Stating the gap is honest. Filling it badly would not be.
+        not_computed.append({
+            "metrics": ["alerts_per_incident"],
+            "title": "Alert volume, meaning how often the detector would page",
+            "reason": ("Nothing in this procedure reads how often a detector alerts, and in "
+                       "scores mode nothing can. A score series has one row per timestamp "
+                       "and no discrete alert windows to count. Threshold up-crossings "
+                       "would be the equivalent and are not implemented, because on a run "
+                       "whose threshold was tuned on this same data the count would inherit "
+                       "that tuning and read better than it is. So a PASS here says nothing "
+                       "about paging load. Run the same detector through alerts mode with "
+                       "its real alert export if you need that answer.")})
+
     if usable_scores:
         computed.update(rank_metrics(y, scores, range_based=contiguous))
         if not contiguous:
@@ -1438,6 +1484,7 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alerts_per_incident_limit"] = ALERTS_PER_INCIDENT_LIMIT
     computed["alerts_per_day"] = round(per_day, 2) if per_day is not None else None
     computed["incident_stretches"] = stretches
+    computed["incident_rows_supplied"] = truth_rows
     # The neighbouring guard says how close a call was and this had no equivalent, which
     # matters more here because one real production stack landed at 49.47 against a limit
     # of 50, missing it by about half an alert.
@@ -1521,8 +1568,7 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       per_day=float(int(
                                           clip_to_range(grid, a_start, a_end)[1].sum()))
                                       / max(1e-9, float(grid["span_seconds"]) / 86400.0),
-                                      stretches=merged_stretches(
-                                          grid, i_start, i_end, int(grid["bucket_seconds"])))
+                                      stretches=merged_stretches(grid, i_start, i_end))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(
