@@ -49,6 +49,34 @@ OVERLAPPING_ALERTS = ("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
                       "2026-03-01T02:30:00Z,2026-03-01T04:00:00Z\n"
                       "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
 
+# The shape of the real PagerDuty export that made the forgotten-ticket guard necessary.
+# 23 incidents over a 35.6 day window. Two of them had been sitting open for 13 and 12 days
+# and held almost all of the incident time. The other 21 held about 16 hours between them.
+TICKET_FROM = "2026-03-01T00:00:00Z"
+TICKET_TO = "2026-04-05T14:24:00Z"          # 35.6 days after TICKET_FROM
+TICKET_MINUTES = [12, 18, 25, 31, 44, 52, 61, 70, 22, 38, 47,
+                  55, 63, 90, 105, 17, 29, 36, 41, 58, 75]    # 21 real incidents
+
+
+def at(days: float) -> str:
+    """An ISO timestamp this many days after TICKET_FROM."""
+    base = byod.parse_bound(TICKET_FROM, "from")
+    return byod.iso(int(base + round(days * 86400)))
+
+
+def ticket_incidents(long_rows: list[tuple[float, float]], scope: str | None = None) -> str:
+    """An incident CSV: the given long rows, then 21 ordinary ones a day apart."""
+    header = "start,end" + (",service\n" if scope else "\n")
+    tail = f",{scope}\n" if scope else "\n"
+    text = header
+    for start_day, end_day in long_rows:
+        text += f"{at(start_day)},{at(end_day)}{tail}"
+    day = 17.0
+    for minutes in TICKET_MINUTES:
+        text += f"{at(day)},{at(day + minutes / 1440.0)}{tail}"
+        day += 0.8
+    return text
+
 
 def write(tmp: Path, name: str, text: str) -> Path:
     path = tmp / name
@@ -612,6 +640,361 @@ class TestOverlappingWindows(TempCase):
             np.array([1, 1, 0, 1, 0, 0, 1], dtype=bool)), 3)
 
 
+class TestForgottenTickets(TempCase):
+    """Two rows nobody closed owned the whole positive class and the tool said nothing.
+
+    The real export: 23 PagerDuty incidents over 35.6 days, two of them left open for 13
+    and 12 days. Those two held 601 of the 620 incident-hours. Prevalence came out at 0.383
+    instead of 0.020, a 19-fold move, and the verdict turned over. Nobody was in a 13 day
+    outage. The existing assumption text warns that tracker times are imprecise, but that
+    is about minutes of slop at the window edges, not one row spanning a third of the run.
+    """
+
+    def ticket_run(self, incidents_text: str, alerts: str | None = None, **kwargs):
+        incidents = write(self.tmp, "tickets.csv", incidents_text)
+        rows = alerts if alerts is not None else f"{at(17.0)},{at(17.05)}\n{at(20.0)},{at(20.1)}\n"
+        path = write(self.tmp, "ticket_alerts.csv", "start,end\n" + rows)
+        opts = dict(t_from=TICKET_FROM, t_to=TICKET_TO, sweep=False)
+        opts.update(kwargs)
+        return byod.check_alerts(path, incidents, "5m", **opts)
+
+    def forgotten(self):
+        """Two rows left open for 13 and 12 days, overlapping, plus 21 real incidents."""
+        return self.ticket_run(ticket_incidents([(2.0, 15.0), (3.5, 15.5)]))
+
+    def clean(self):
+        """The same 21 real incidents with the two forgotten rows taken out."""
+        return self.ticket_run(ticket_incidents([]))
+
+    def test_two_forgotten_rows_are_named_with_their_length_and_share(self):
+        c = self.forgotten()["results"]["incident_concentration"]
+        self.assertEqual(c["rows_in_range"], 23)
+        self.assertEqual(len(c["long_rows"]), 2)
+        self.assertEqual([r["seconds_in_range"] for r in c["long_rows"]],
+                         [13 * 86400, 12 * 86400])
+        self.assertGreater(c["long_row_share_of_incident_time"], 0.95)
+        self.assertGreater(c["long_rows"][0]["share_of_range"],
+                           byod.LONG_INCIDENT_RANGE_SHARE)
+        self.assertGreater(c["long_rows"][0]["multiple_of_median"],
+                           byod.LONG_INCIDENT_MEDIAN_MULTIPLE)
+
+    def test_the_notice_says_how_far_prevalence_moved(self):
+        r = self.forgotten()
+        c = r["results"]["incident_concentration"]
+        # 0.40 with the two rows in, 0.021 without them. A 19-fold move on two rows.
+        self.assertAlmostEqual(r["results"]["prevalence"], 0.40, places=2)
+        self.assertAlmostEqual(c["prevalence_without_long_rows"], 0.021, places=3)
+        self.assertAlmostEqual(c["prevalence_without_long_rows"],
+                               self.clean()["results"]["prevalence"], places=4)
+
+    def test_the_notice_sits_with_the_verdict_and_says_what_it_means(self):
+        report = byod.render_report(self.forgotten())
+        notice = report.index("Implausibly long incident rows.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:notice + 1800]
+        self.assertIn("13.0 days", body)
+        self.assertIn("12.0 days", body)
+        self.assertIn("2 of the 23 incident rows", body)
+        self.assertIn("percent of all incident time", body)
+        self.assertIn("small number of rows own most of the positive class", body)
+        self.assertIn("ticket nobody closed", body)
+
+    def test_nothing_is_dropped_and_the_report_says_so(self):
+        r = self.forgotten()
+        # The long rows still count. Prevalence, the floor and the verdict are all computed
+        # on the file as given. The user decides which rows are real.
+        self.assertGreater(r["results"]["prevalence"], 0.3)
+        self.assertIn("Nothing was dropped", byod.render_report(r))
+
+    def test_a_file_with_no_stuck_ticket_gets_no_notice(self):
+        r = self.clean()
+        c = r["results"]["incident_concentration"]
+        self.assertEqual(c["long_rows"], [])
+        self.assertIsNone(c["prevalence_without_long_rows"])
+        self.assertNotIn("Implausibly long incident rows.", byod.render_report(r))
+
+    def test_a_genuinely_long_outage_in_a_short_window_is_not_flagged(self):
+        # Four hours of a single day is 17 percent of the range, over the share threshold,
+        # but it is only three times the median row. A real outage is not a stuck ticket.
+        incidents = write(self.tmp, "long_day.csv",
+                          "start,end\n"
+                          "2026-03-01T02:00:00Z,2026-03-01T06:00:00Z\n"
+                          "2026-03-01T09:00:00Z,2026-03-01T10:20:00Z\n"
+                          "2026-03-01T14:00:00Z,2026-03-01T15:20:00Z\n"
+                          "2026-03-01T20:00:00Z,2026-03-01T21:00:00Z\n")
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T06:00:00Z\n", incidents=incidents)
+        c = r["results"]["incident_concentration"]
+        longest = 4 * 3600
+        self.assertGreater(longest / c["range_seconds"], byod.LONG_INCIDENT_RANGE_SHARE)
+        self.assertLess(longest / c["median_incident_seconds"],
+                        byod.LONG_INCIDENT_MEDIAN_MULTIPLE)
+        self.assertEqual(c["long_rows"], [])
+
+    def test_an_outlier_that_is_tiny_against_the_range_is_not_flagged(self):
+        # Twenty times the median row, and still under two percent of the range. Ordinary
+        # spread in a file of short incidents is not a broken row.
+        rows = "".join(f"2026-03-01T{h:02d}:00:00Z,2026-03-01T{h:02d}:01:00Z\n"
+                       for h in range(4, 14))
+        rows += "2026-03-01T20:00:00Z,2026-03-01T20:20:00Z\n"
+        incidents = write(self.tmp, "spread.csv", "start,end\n" + rows)
+        r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T04:01:00Z\n", incidents=incidents)
+        c = r["results"]["incident_concentration"]
+        self.assertEqual(c["median_incident_seconds"], 60)
+        self.assertEqual(c["long_rows"], [])
+
+    def test_two_rows_are_too_few_to_have_a_median(self):
+        # With one or two rows there is no distribution to be an outlier against, so the
+        # guard stays quiet rather than calling the larger of two rows broken.
+        r = self.ticket_run("start,end\n"
+                            f"{at(2.0)},{at(15.0)}\n"
+                            f"{at(20.0)},{at(20.01)}\n")
+        c = r["results"]["incident_concentration"]
+        self.assertEqual(c["rows_in_range"], 2)
+        self.assertEqual(c["long_rows"], [])
+
+    def test_a_lopsided_file_with_no_broken_row_still_gets_a_line(self):
+        # No single row is long enough to look forgotten, and the longest tenth still owns
+        # most of the incident time. That is the general form of the same problem.
+        rows = "".join(f"{at(10 + i * 0.5)},{at(10 + i * 0.5 + 0.002)}\n" for i in range(9))
+        r = self.ticket_run("start,end\n" + f"{at(2.0)},{at(3.2)}\n" + rows)
+        c = r["results"]["incident_concentration"]
+        self.assertEqual(c["long_rows"], [])
+        self.assertTrue(c["concentrated"])
+        self.assertGreater(c["top_rows_share_of_incident_time"], byod.CONCENTRATION_NOTICE)
+        report = byod.render_report(r)
+        self.assertIn("Lopsided ground truth.", report)
+        self.assertLess(report.index("Lopsided ground truth."),
+                        report.index("| Check | Section |"))
+
+    def test_the_guard_applies_in_scores_mode_too(self):
+        incidents = write(self.tmp, "tickets.csv", ticket_incidents([(2.0, 15.0), (3.5, 15.5)]))
+        t0 = byod.parse_bound(TICKET_FROM, "from")
+        rows = [(t0 + i * 3600, round(0.2 + 0.1 * (i % 5), 6)) for i in range(24 * 36)]
+        text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
+        path = write(self.tmp, "ticket_scores.csv", text)
+        r = byod.check_scores(path, incidents, "1h", t_from=TICKET_FROM, t_to=TICKET_TO)
+        self.assertEqual(len(r["results"]["incident_concentration"]["long_rows"]), 2)
+        self.assertIn("Implausibly long incident rows.", byod.render_report(r))
+
+
+class TestBucketSweep(TempCase):
+    """The bucket size chose the verdict, so one bucket's answer is not handed back alone.
+
+    On the real export the same two files gave EXCLUDE at 1m and 5m and PASS at 15m, 30m,
+    1h and 2h, with the lift climbing monotonically through 0.82, 0.90, 1.05, 1.21, 1.25
+    and 1.28. A coarse bucket lets one short alert cover a whole bucket of incident time
+    for free, so recall rises with the bucket while precision is barely charged for it.
+    """
+
+    def unstable(self, **kwargs):
+        """EXCLUDE at 1m, 5m and 15m, PASS at 1h. The detector never changes."""
+        return self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                           "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n", **kwargs)
+
+    def stable(self, **kwargs):
+        return self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n"
+                           "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n", **kwargs)
+
+    def test_a_verdict_that_moves_with_the_bucket_is_reported_as_unstable(self):
+        r = self.unstable()
+        sweep = r["results"]["bucket_sweep"]
+        self.assertEqual(r["verdict"], "UNSTABLE")
+        self.assertTrue(sweep["unstable"])
+        self.assertEqual(sweep["verdicts"], ["EXCLUDE", "PASS"])
+
+    def test_the_sweep_reports_every_bucket_including_the_one_you_passed(self):
+        sweep = self.unstable()["results"]["bucket_sweep"]
+        self.assertEqual([b["bucket"] for b in sweep["buckets"]], ["1m", "5m", "15m", "1h"])
+        selected = [b for b in sweep["buckets"] if b["is_selected"]]
+        self.assertEqual([b["bucket"] for b in selected], ["1m"])
+        self.assertEqual(selected[0]["bucket_seconds"], 60)
+
+    def test_the_table_and_the_reason_sit_with_the_verdict(self):
+        report = byod.render_report(self.unstable())
+        notice = report.index("The verdict is not stable across bucket sizes.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:report.index("| Check | Section |")]
+        self.assertIn("EXCLUDE at 1m, 5m, 15m and PASS at 1h", body)
+        self.assertIn("| Bucket | Buckets | Prevalence |", body)
+        self.assertIn("| 1h | 24 |", body)
+        self.assertIn("choosing the bucket is choosing the answer", body)
+        self.assertIn("covers a whole bucket of incident time for free"
+                      .replace("covers", "cover"), body)
+
+    def test_the_lift_climbing_with_the_bucket_is_named(self):
+        sweep = self.unstable()["results"]["bucket_sweep"]
+        lifts = [b["f1_over_floor"] for b in sweep["buckets"]]
+        self.assertEqual(lifts, sorted(lifts))
+        self.assertTrue(sweep["lift_rises_with_bucket_size"])
+        self.assertIn("signature of that mechanism", byod.render_report(self.unstable()))
+
+    def test_a_stable_verdict_is_kept_and_the_sweep_is_shown(self):
+        r = self.stable()
+        sweep = r["results"]["bucket_sweep"]
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertFalse(sweep["unstable"])
+        self.assertEqual(sweep["verdicts"], ["PASS"])
+        report = byod.render_report(r)
+        self.assertIn("Bucket sweep.", report)
+        self.assertIn("## The verdict at other bucket sizes", report)
+        self.assertNotIn("The verdict is not stable", report)
+
+    def test_no_sweep_returns_the_single_bucket_verdict(self):
+        r = self.unstable(sweep=False)
+        self.assertEqual(r["verdict"], "EXCLUDE")
+        self.assertNotIn("bucket_sweep", r["results"])
+        self.assertNotIn("not stable across bucket sizes", byod.render_report(r))
+
+    def test_a_run_that_cannot_be_evaluated_is_not_swept(self):
+        outside = write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
+        r = self.alerts(OVERLAPPING_ALERTS, incidents=outside)
+        self.assertEqual(r["verdict"], "INSUFFICIENT")
+        self.assertNotIn("bucket_sweep", r["results"])
+
+    def test_the_near_floor_notice_defers_to_the_sweep(self):
+        # The near-floor notice used to ask the reader to re-run at other buckets. The
+        # sweep has already done that, so it points at the answer instead of asking again.
+        self.assertIn("which is why the verdict is UNSTABLE",
+                      byod.render_report(self.unstable()))
+        near = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:00:00Z\n"
+                           "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        self.assertTrue(near["results"]["near_floor"])
+        self.assertIn("every one of them gave the same verdict",
+                      byod.render_report(near))
+
+    def test_scores_mode_is_not_swept(self):
+        # In scores mode the operating point moves with the bucket as well as the bucket
+        # boundaries, so a sweep there would change two things at once.
+        r = self.scores(self.score_rows(0.9, 0.1, jitter=0.05))
+        self.assertNotIn("bucket_sweep", r["results"])
+
+
+class TestScope(TempCase):
+    """Alerts and incidents can describe different systems and nothing used to notice.
+
+    One real run scored 156 Watchdog alerts across 34 services against 23 PagerDuty
+    incidents that all came from one service. Most of those alerts could not have matched
+    anything in the incident file, and every one of them was charged as a false positive.
+    """
+
+    ALERTS = ("start,end,service\n"
+              "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,checkout\n"
+              "2026-03-01T06:00:00Z,2026-03-01T07:00:00Z,billing\n"
+              "2026-03-01T09:00:00Z,2026-03-01T10:00:00Z,search\n"
+              "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z,recommender\n")
+    INCIDENTS = ("start,end,service\n"
+                 "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,checkout\n"
+                 "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z,checkout\n")
+
+    def scoped(self, alerts: str | None = None, incidents: str | None = None, **kwargs):
+        a = write(self.tmp, "scoped_alerts.csv", alerts or self.ALERTS)
+        i = write(self.tmp, "scoped_incidents.csv", incidents or self.INCIDENTS)
+        opts = dict(t_from=DAY_FROM, t_to=DAY_TO, sweep=False)
+        opts.update(kwargs)
+        return byod.check_alerts(a, i, BUCKET, **opts)
+
+    def test_the_overlap_is_counted_on_both_sides(self):
+        s = self.scoped()["results"]["scope"]
+        self.assertTrue(s["checked"])
+        self.assertEqual(s["alert_scope_column"], "service")
+        self.assertEqual(s["incident_scope_column"], "service")
+        self.assertEqual(s["alert_scopes"], 4)
+        self.assertEqual(s["incident_scopes"], 1)
+        self.assertEqual(s["shared_scopes"], 1)
+        self.assertEqual(s["alert_rows_on_unmatched_scopes"], 3)
+        self.assertAlmostEqual(s["unmatched_alert_row_share"], 0.75, places=4)
+
+    def test_poor_overlap_is_named_next_to_the_verdict(self):
+        r = self.scoped()
+        self.assertTrue(r["results"]["scope"]["poor_overlap"])
+        report = byod.render_report(r)
+        notice = report.index("Scope mismatch.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:notice + 900]
+        self.assertIn("3 of 4 alert rows (75.0 percent)", body)
+        self.assertIn("`billing`", body)
+        self.assertIn("may be describing different systems", body)
+
+    def test_matching_scopes_get_no_notice(self):
+        alerts = ("start,end,service\n"
+                  "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,checkout\n"
+                  "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z,checkout\n")
+        r = self.scoped(alerts=alerts)
+        s = r["results"]["scope"]
+        self.assertTrue(s["checked"])
+        self.assertEqual(s["alert_rows_on_unmatched_scopes"], 0)
+        self.assertFalse(s["poor_overlap"])
+        self.assertNotIn("Scope mismatch.", byod.render_report(r))
+
+    def test_scope_is_reported_and_never_filters_a_row(self):
+        # Same windows with and without the column. Adding scope must not move a number.
+        scoped = self.scoped()
+        plain = self.scoped(
+            alerts=self.ALERTS.replace(",service", "").replace(",checkout", "")
+                              .replace(",billing", "").replace(",search", "")
+                              .replace(",recommender", ""),
+            incidents=self.INCIDENTS.replace(",service", "").replace(",checkout", ""))
+        for key in ("prevalence", "precision", "recall", "f1_score", "tp", "fp", "fn", "tn"):
+            self.assertEqual(scoped["results"][key], plain["results"][key], key)
+        self.assertEqual(scoped["verdict"], plain["verdict"])
+
+    def test_a_file_without_the_column_behaves_as_before_and_says_what_that_risks(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n")
+        s = r["results"]["scope"]
+        self.assertFalse(s["checked"])
+        self.assertIsNone(s["alert_scope_column"])
+        joined = " ".join(r["assumptions"])
+        self.assertIn("Scope was not checked", joined)
+        self.assertIn("--scope-col", joined)
+        self.assertIn("counted as false positives", joined)
+        self.assertNotIn("Scope mismatch.", byod.render_report(r))
+
+    def test_one_file_with_a_scope_column_and_one_without(self):
+        r = self.scoped(incidents=INCIDENTS)
+        s = r["results"]["scope"]
+        self.assertFalse(s["checked"])
+        self.assertEqual(s["alert_scope_column"], "service")
+        self.assertIsNone(s["incident_scope_column"])
+        joined = " ".join(r["assumptions"])
+        self.assertIn("Only the alerts file carries a scope column", joined)
+        self.assertIn("--incident-scope-col", joined)
+
+    def test_an_unrecognised_column_name_is_named_explicitly(self):
+        alerts = self.ALERTS.replace("service", "affected_thing")
+        incidents = self.INCIDENTS.replace("service", "impacted_svc")
+        r = self.scoped(alerts=alerts, incidents=incidents,
+                        scope_col="affected_thing", incident_scope_col="impacted_svc")
+        s = r["results"]["scope"]
+        self.assertTrue(s["checked"])
+        self.assertEqual(s["alert_scope_column"], "affected_thing")
+        self.assertEqual(s["incident_scope_column"], "impacted_svc")
+        self.assertEqual(s["shared_scopes"], 1)
+
+    def test_the_incident_scope_override_falls_back_to_the_alert_one(self):
+        alerts = self.ALERTS.replace("service", "owner")
+        incidents = self.INCIDENTS.replace("service", "owner")
+        s = self.scoped(alerts=alerts, incidents=incidents,
+                        scope_col="owner")["results"]["scope"]
+        self.assertEqual(s["incident_scope_column"], "owner")
+
+    def test_scores_mode_says_scope_cannot_be_checked(self):
+        r = self.scores(self.score_rows(0.9, 0.1, jitter=0.05))
+        self.assertFalse(r["results"]["scope"]["checked"])
+        joined = " ".join(r["assumptions"])
+        self.assertIn("a score series carries one row per timestamp", joined)
+
+    def test_the_per_row_scope_values_stay_out_of_the_json(self):
+        r = self.scoped()
+        for name in ("alerts", "incidents"):
+            self.assertNotIn("scope_values", r["inputs"][name])
+            self.assertEqual(r["inputs"][name]["scope_column"], "service")
+        self.assertEqual(r["inputs"]["alerts"]["distinct_scopes"], 4)
+        json.dumps(r)   # the whole result still serialises
+
+
 class TestConstantScore(TempCase):
     def test_one_constant_score_is_excluded_and_gets_no_rank_metrics(self):
         t0 = byod.parse_bound(DAY_FROM, "from")
@@ -1022,6 +1405,59 @@ class TestCli(unittest.TestCase):
                                "--out", str(d / "out"))
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertIn("Verdict: **PASS**", p.stdout)
+
+    def test_a_verdict_that_moves_with_the_bucket_exits_four(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(
+                "start,end\n"
+                "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+            (d / "alerts.csv").write_text(
+                "start,end\n"
+                "2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+            args = ["--alerts", str(d / "alerts.csv"),
+                    "--incidents", str(d / "incidents.csv"),
+                    "--bucket", "5m", "--from", "2026-03-01T00:00:00Z",
+                    "--to", "2026-03-02T00:00:00Z", "--out", str(d / "out")]
+            p = self.run_check(*args)
+            self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+            self.assertIn("Verdict: **UNSTABLE**", p.stdout)
+            self.assertIn("not stable across bucket sizes", p.stdout)
+            result = json.loads((d / "out" / "alerts" / "check_result.json").read_text())
+            self.assertTrue(result["results"]["bucket_sweep"]["unstable"])
+            # And --no-sweep gives the single-bucket answer back, for anyone who wants it.
+            q = self.run_check(*args, "--no-sweep")
+            self.assertEqual(q.returncode, 2, q.stdout + q.stderr)
+
+    def test_the_scope_flags_are_documented_in_help(self):
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--help"],
+            cwd=ROOT, capture_output=True, text=True)
+        for flag in ("--scope-col", "--incident-scope-col", "--no-sweep"):
+            self.assertIn(flag, p.stdout)
+        self.assertIn("4  UNSTABLE", p.stdout)
+
+    def test_a_scope_mismatch_is_visible_from_the_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(
+                "start,end,service\n"
+                "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,checkout\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z,checkout\n")
+            (d / "alerts.csv").write_text(
+                "start,end,service\n"
+                "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,checkout\n"
+                "2026-03-01T06:00:00Z,2026-03-01T07:00:00Z,billing\n"
+                "2026-03-01T09:00:00Z,2026-03-01T10:00:00Z,search\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z,recommender\n")
+            p = self.run_check("--alerts", str(d / "alerts.csv"),
+                               "--incidents", str(d / "incidents.csv"),
+                               "--bucket", "5m", "--from", "2026-03-01T00:00:00Z",
+                               "--to", "2026-03-02T00:00:00Z", "--out", str(d / "out"))
+            self.assertIn("Scope mismatch.", p.stdout)
+            self.assertIn("may be describing different systems", p.stdout)
 
     def test_passing_both_alerts_and_scores_is_refused(self):
         p = self.run_check("--alerts", "examples/alerts_good.csv",
