@@ -42,12 +42,14 @@ import numpy as np
 import pandas as pd
 
 from . import SPEC_VERSION
-from .checks import (DEGENERATE_AUC, DEGENERATE_F1_RATIO, FLOOR_MARGIN,
-                     RANDOM_AUC_REFERENCE, RECALL_SATURATION, flag_everything,
+from .checks import (DEGENERATE_AUC, DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE,
+                     RANDOM_AUC_REFERENCE, RECALL_SATURATION, check_state, flag_everything,
                      predict_all_f1)
 
 # Header names seen in real exports. Matching is case insensitive and ignores surrounding
-# whitespace. Pass --start-col, --end-col, --timestamp-col or --score-col to override.
+# whitespace. Pass --start-col, --end-col, --timestamp-col or --score-col to override, and
+# --incident-start-col or --incident-end-col when the incident CSV names its columns
+# differently from the alerts CSV.
 START_COLS = ("start", "start_time", "starttime", "started_at", "starts_at", "begin",
               "from", "opened_at", "triggered_at", "fired_at", "start_ts")
 END_COLS = ("end", "end_time", "endtime", "ended_at", "ends_at", "finish",
@@ -684,26 +686,26 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     return computed, not_computed
 
 
-NOT_EVALUABLE = "not evaluable"
-
-
-def check_state(fired: bool, can_evaluate: bool) -> str:
-    """One check, in one of three states. Passing is not the default."""
-    if not can_evaluate:
-        return NOT_EVALUABLE
-    return "EXCLUDE" if fired else "pass"
-
-
 # --------------------------------------------------------------------------- drivers
 
 def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                  t_from: str | None = None, t_to: str | None = None,
                  infer_range: bool = False, start_col: str | None = None,
-                 end_col: str | None = None) -> dict:
-    """Alerts mode. Bucket the timeline, mark alerted and truly anomalous, then check."""
+                 end_col: str | None = None, incident_start_col: str | None = None,
+                 incident_end_col: str | None = None) -> dict:
+    """Alerts mode. Bucket the timeline, mark alerted and truly anomalous, then check.
+
+    The two files are separate exports and rarely agree on column names. A Watchdog export
+    uses triggered_at and resolved_at while an incident tracker uses start and end, so each
+    file gets its own override. start_col and end_col name the columns of the alerts CSV.
+    The incident overrides fall back to them, which is what a user who passes only
+    start_col and end_col already expects.
+    """
     bucket_s = parse_duration(bucket)
     a_start, a_end, a_note = read_windows(Path(alerts_csv), start_col, end_col, "alert")
-    i_start, i_end, i_note = read_windows(Path(incidents_csv), start_col, end_col, "incident")
+    i_start, i_end, i_note = read_windows(Path(incidents_csv),
+                                          incident_start_col or start_col,
+                                          incident_end_col or end_col, "incident")
 
     lows = [int(x.min()) for x in (a_start, i_start) if len(x)]
     highs = [int(x.max()) for x in (a_end, i_end) if len(x)]
@@ -728,10 +730,17 @@ def check_scores(scores_csv: Path, incidents_csv: Path, bucket: str | None = Non
                  infer_range: bool = False, threshold: float | None = None,
                  aggregate: str = "max", timestamp_col: str | None = None,
                  score_col: str | None = None, start_col: str | None = None,
-                 end_col: str | None = None) -> dict:
-    """Scores mode. Same timeline, but a real score per bucket, so the rank metrics apply."""
+                 end_col: str | None = None, incident_start_col: str | None = None,
+                 incident_end_col: str | None = None) -> dict:
+    """Scores mode. Same timeline, but a real score per bucket, so the rank metrics apply.
+
+    The incident CSV is the only window file here, so it takes incident_start_col and
+    incident_end_col, falling back to start_col and end_col.
+    """
     times, values, s_note = read_scores(Path(scores_csv), timestamp_col, score_col)
-    i_start, i_end, i_note = read_windows(Path(incidents_csv), start_col, end_col, "incident")
+    i_start, i_end, i_note = read_windows(Path(incidents_csv),
+                                          incident_start_col or start_col,
+                                          incident_end_col or end_col, "incident")
 
     if bucket is None:
         bucket_s = median_gap(times)

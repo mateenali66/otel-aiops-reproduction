@@ -454,6 +454,74 @@ class TestReportHonesty(TempCase):
                     self.assertNotIn(label, report)
 
 
+class TestColumnOverrides(TempCase):
+    """The alerts CSV and the incidents CSV are separate exports with separate headers.
+
+    A Watchdog export uses triggered_at and resolved_at while an incident tracker uses
+    start and end. One pair of overrides cannot serve both files, so each file has its own.
+    """
+
+    # Names no alias list knows, so only an explicit override can find them.
+    ODD_ALERTS = ("alert_from,alert_until\n"
+                  "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n")
+    ODD_INCIDENTS = ("inc_from,inc_until\n"
+                     "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                     "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+
+    def odd_files(self):
+        return (write(self.tmp, "odd_alerts.csv", self.ODD_ALERTS),
+                write(self.tmp, "odd_incidents.csv", self.ODD_INCIDENTS))
+
+    def test_each_file_takes_its_own_column_names(self):
+        alerts, incidents = self.odd_files()
+        r = byod.check_alerts(alerts, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                              start_col="alert_from", end_col="alert_until",
+                              incident_start_col="inc_from", incident_end_col="inc_until")
+        self.assertEqual(r["results"]["n_anomalous_buckets"], N_ANOMALOUS)
+        self.assertEqual(r["inputs"]["alerts"]["start_column"], "alert_from")
+        self.assertEqual(r["inputs"]["incidents"]["start_column"], "inc_from")
+
+    def test_the_same_run_without_the_incident_override_names_the_incident_file(self):
+        alerts, incidents = self.odd_files()
+        with self.assertRaises(byod.InputError) as ctx:
+            byod.check_alerts(alerts, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                              start_col="alert_from", end_col="alert_until")
+        msg = str(ctx.exception)
+        self.assertIn("odd_incidents.csv", msg)
+        self.assertIn("alert_from", msg)
+
+    def test_the_incident_override_falls_back_to_the_alert_one(self):
+        # Both files use the same odd names, which is what the old behaviour assumed.
+        shared_alerts = write(self.tmp, "shared_alerts.csv",
+                              self.ODD_ALERTS.replace("alert_", "w_"))
+        shared_incidents = write(self.tmp, "shared_incidents.csv",
+                                 self.ODD_INCIDENTS.replace("inc_", "w_"))
+        r = byod.check_alerts(shared_alerts, shared_incidents, BUCKET,
+                              t_from=DAY_FROM, t_to=DAY_TO,
+                              start_col="w_from", end_col="w_until")
+        self.assertEqual(r["results"]["n_anomalous_buckets"], N_ANOMALOUS)
+        self.assertEqual(r["inputs"]["incidents"]["start_column"], "w_from")
+
+    def test_the_overrides_give_the_same_result_as_recognised_headers(self):
+        alerts, incidents = self.odd_files()
+        odd = byod.check_alerts(alerts, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                                start_col="alert_from", end_col="alert_until",
+                                incident_start_col="inc_from", incident_end_col="inc_until")
+        plain = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n")
+        self.assertEqual(odd["verdict"], plain["verdict"])
+        self.assertEqual(odd["results"]["f1_score"], plain["results"]["f1_score"])
+
+    def test_scores_mode_takes_the_incident_override_too(self):
+        _, incidents = self.odd_files()
+        rows = self.score_rows(0.9, 0.1, jitter=0.05)
+        text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
+        path = write(self.tmp, "odd_scores.csv", text)
+        r = byod.check_scores(path, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                              incident_start_col="inc_from", incident_end_col="inc_until")
+        self.assertEqual(r["results"]["n_anomalous_buckets"], N_ANOMALOUS)
+        self.assertEqual(r["inputs"]["incidents"]["end_column"], "inc_until")
+
+
 class TestTimestamps(unittest.TestCase):
     def test_epoch_seconds_and_iso_agree(self):
         import pandas as pd
@@ -600,6 +668,35 @@ class TestCli(unittest.TestCase):
                            "--out", str(ROOT / "out" / "check-test"))
         self.assertNotIn("artifact not found", p.stdout + p.stderr)
         self.assertEqual(p.returncode, 0)
+
+    def test_the_incident_column_flags_are_documented_in_help(self):
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--help"],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertIn("--incident-start-col", p.stdout)
+        self.assertIn("--incident-end-col", p.stdout)
+
+    def test_two_exports_with_different_headers_run_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "alerts.csv").write_text(
+                "triggered_at,resolved_at\n"
+                "2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+            (d / "incidents.csv").write_text(
+                "opened,shut\n"
+                "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+            p = self.run_check("--alerts", str(d / "alerts.csv"),
+                               "--incidents", str(d / "incidents.csv"),
+                               "--bucket", "60s", "--from", "2026-03-01T00:00:00Z",
+                               "--to", "2026-03-02T00:00:00Z",
+                               "--start-col", "triggered_at", "--end-col", "resolved_at",
+                               "--incident-start-col", "opened",
+                               "--incident-end-col", "shut",
+                               "--out", str(d / "out"))
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("Verdict: **PASS**", p.stdout)
 
     def test_passing_both_alerts_and_scores_is_refused(self):
         p = self.run_check("--alerts", "examples/alerts_good.csv",

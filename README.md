@@ -246,10 +246,18 @@ The pilot path evaluates any detector under the FDES procedure on the archived t
    python bin/reproduce.py pilot --detector my_module:MyDetector --signal metrics --fold 1
    ```
 
-   Exit code 0 means PASS, 2 means EXCLUDE under section 8. The report
-   (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its reference
-   value. `pilot_result.json` has the numbers and the fold assignment. The raw test scores and
-   labels are saved as `.npy` for the prevalence re-scoring step.
+   Exit code 0 means PASS, 2 means EXCLUDE under section 8 and 3 means INSUFFICIENT. The
+   report (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its
+   reference value. `pilot_result.json` has the numbers, the fold assignment and the
+   per-check `check_status`. The raw test scores and labels are saved as `.npy` for the
+   prevalence re-scoring step.
+
+   A fold whose evaluated windows carry one class only is `INSUFFICIENT`. AUC-ROC is
+   undefined there, precision, recall and F1 carry no information, and no check can be
+   applied. Each check reports `not evaluable` and the report says why, next to the verdict.
+   No check reports a pass and the run is never `PASS`. This cannot happen on the archived
+   folds, which all carry both classes, but it can happen on a feature table you supply with
+   `--features`.
 
 3. To use your own telemetry, pass `--features path/to/features.parquet`. The table must
    contain `label` (0 or 1 per window), `rep` (repetition id 1 to 10, used for the fold split),
@@ -350,7 +358,7 @@ Exit code 0 means PASS, 2 means EXCLUDE and 3 means INSUFFICIENT. The run writes
 ### The three verdicts
 
 `EXCLUDE` and `INSUFFICIENT` are opposite messages. One says fix your detector. The other
-says fix your input.
+says fix your input. The pilot path uses the same three verdicts and the same exit codes.
 
 | Verdict | Exit code | What it means | What to do |
 |---|---|---|---|
@@ -402,6 +410,22 @@ for a score. Anything else, name it with `--start-col`, `--end-col`, `--timestam
 `--score-col`. Extra columns are ignored, except that a `severity` or `priority` column is
 counted in the report.
 
+The alerts CSV and the incidents CSV are separate exports and often disagree on header
+names. A Watchdog export uses `triggered_at` and `resolved_at` while an incident tracker
+uses `start` and `end`, so each file takes its own override. `--start-col` and `--end-col`
+name the columns of the alerts CSV. `--incident-start-col` and `--incident-end-col` name
+the columns of the incidents CSV, and when they are not given they fall back to
+`--start-col` and `--end-col`, which is what a run that passes only those two already does.
+In scores mode the incidents CSV is the only window file, so both pairs reach it under the
+same fallback.
+
+```bash
+python bin/reproduce.py check \
+  --alerts watchdog_export.csv --start-col triggered_at --end-col resolved_at \
+  --incidents incident_tracker.csv --incident-start-col start --incident-end-col end \
+  --bucket 5m --from 2026-03-01T00:00:00Z --to 2026-03-08T00:00:00Z
+```
+
 An alerts CSV with a start but no end is read as point events, one bucket each. An alerts
 CSV with a header and no rows is read as "this detector never fired", which is a real
 result and gets a real verdict.
@@ -446,6 +470,15 @@ used.
 | PR-AUC against its p reference | 6, 7 | **no** | yes |
 | VUS-PR and VUS-ROC | 6 | **no** | yes, but only when every bucket in the range holds a score sample |
 | Degenerate rule from the article's Table 12 | 8 | **no** | yes |
+
+**Known limit in the degenerate output guard.** The near-constant test measures the spread
+of the score column against its mean, so it reads a large constant offset as if the whole
+column were constant. A series of `1e9 +/- 100` has a relative spread of 2e-7, under the
+1e-6 tolerance, so it is called near-constant and excluded even though its ordering carries
+real information. Rank metrics only read the ordering, so the offset should not matter. The
+guard errs towards refusing rather than passing, and the report prints `score_spread` and
+`distinct_scores` so the call can be checked. Centre the series, or subtract the offset, to
+work around it. `CONSTANT_SPREAD_RATIO` in `fdes/byod.py` sets the tolerance.
 
 ### What alerts mode refuses to compute, and why
 
@@ -557,7 +590,7 @@ fdes/vus.py             VUS-PR and VUS-ROC, ported from the TSB-AD reference imp
 fdes/byod.py            the bring-your-own-data path behind `make check`
 detectors/base.py       plugin interface; detectors/example_isolation_forest.py
 examples/               sample alert, incident and score CSVs plus the script that makes them
-tests/                  unit tests for the check path (`make test`, no Zenodo needed)
+tests/                  unit tests for the check and pilot paths (`make test`, no Zenodo needed)
 expected/               archived values verify compares against
 runs/                   recorded runs: manifest, verify reports, tables (evidence, not inputs)
 Dockerfile              python:3.11-slim@sha256:1042b6... + CPU torch 2.5.1 + exact pins

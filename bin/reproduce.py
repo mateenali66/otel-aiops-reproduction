@@ -11,8 +11,10 @@ Subcommands
   estimate        print the runtime estimate without running anything
   pilot           evaluate your own detector under the FDES v1.0.0-draft procedure
   check           run the FDES checks against your own alert or score CSVs; no Zenodo
-                  artifact and no detector plugin needed. Exit 0 PASS, 2 EXCLUDE,
-                  3 INSUFFICIENT (the input could not support a verdict)
+                  artifact and no detector plugin needed
+
+Both pilot and check exit 0 on PASS, 2 on EXCLUDE and 3 on INSUFFICIENT (the input could
+not support a verdict either way).
 
 Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
 sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
@@ -464,6 +466,15 @@ def cmd_verify_archive(args) -> None:
     sys.exit(1 if failures else 0)
 
 
+# --------------------------------------------------------------------------- verdicts
+
+# PASS, EXCLUDE and INSUFFICIENT are three different answers, so they get three exit codes.
+# EXCLUDE means the detector is not worth deploying. INSUFFICIENT means the input could not
+# support a verdict either way, which is a problem with the input and not with the detector.
+# Both the pilot path and the check path use them.
+VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3}
+
+
 # --------------------------------------------------------------------------- pilot
 
 def cmd_pilot(args) -> None:
@@ -477,16 +488,10 @@ def cmd_pilot(args) -> None:
                   Path(args.features) if args.features else None)
     log((out / "pilot_report.md").read_text())
     log(f"written: {out}/pilot_result.json, pilot_report.md")
-    sys.exit(0 if r["verdict"] == "PASS" else 2)
+    sys.exit(VERDICT_EXIT_CODES[r["verdict"]])
 
 
 # --------------------------------------------------------------------------- check
-
-# PASS, EXCLUDE and INSUFFICIENT are three different answers, so they get three exit codes.
-# EXCLUDE means the detector is not worth deploying. INSUFFICIENT means the input could not
-# support a verdict either way, which is a problem with the CSVs and not with the detector.
-CHECK_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3}
-
 
 def cmd_check(args) -> None:
     """Run the FDES checks against the user's own CSVs. No Zenodo artifact is needed."""
@@ -500,7 +505,9 @@ def cmd_check(args) -> None:
             result = byod.check_alerts(
                 args.alerts, args.incidents, args.bucket or "60s",
                 t_from=args.range_from, t_to=args.range_to, infer_range=args.infer_range,
-                start_col=args.start_col, end_col=args.end_col)
+                start_col=args.start_col, end_col=args.end_col,
+                incident_start_col=args.incident_start_col,
+                incident_end_col=args.incident_end_col)
             label = args.label or Path(args.alerts).stem
         else:
             result = byod.check_scores(
@@ -508,7 +515,9 @@ def cmd_check(args) -> None:
                 t_from=args.range_from, t_to=args.range_to, infer_range=args.infer_range,
                 threshold=args.threshold, aggregate=args.aggregate,
                 timestamp_col=args.timestamp_col, score_col=args.score_col,
-                start_col=args.start_col, end_col=args.end_col)
+                start_col=args.start_col, end_col=args.end_col,
+                incident_start_col=args.incident_start_col,
+                incident_end_col=args.incident_end_col)
             label = args.label or Path(args.scores).stem
     except byod.InputError as exc:
         sys.exit(f"input problem: {exc}")
@@ -516,7 +525,7 @@ def cmd_check(args) -> None:
     out = byod.write_outputs(result, Path(args.out) / label)
     log((out / "check_report.md").read_text())
     log(f"written: {out}/check_result.json, check_report.md")
-    sys.exit(CHECK_EXIT_CODES[result["verdict"]])
+    sys.exit(VERDICT_EXIT_CODES[result["verdict"]])
 
 
 # --------------------------------------------------------------------------- main
@@ -579,8 +588,19 @@ def main() -> None:
                    help="in scores mode, how to reduce several scores inside one bucket")
     s.add_argument("--timestamp-col", default=None, help="override the timestamp column name")
     s.add_argument("--score-col", default=None, help="override the score column name")
-    s.add_argument("--start-col", default=None, help="override the window start column name")
-    s.add_argument("--end-col", default=None, help="override the window end column name")
+    s.add_argument("--start-col", default=None,
+                   help="override the window start column name in the alerts CSV. It also "
+                        "applies to the incidents CSV unless --incident-start-col is given.")
+    s.add_argument("--end-col", default=None,
+                   help="override the window end column name in the alerts CSV. It also "
+                        "applies to the incidents CSV unless --incident-end-col is given.")
+    s.add_argument("--incident-start-col", default=None,
+                   help="override the window start column name in the incidents CSV. Use "
+                        "it when the incident export names its columns differently from "
+                        "the alerts export. Defaults to --start-col.")
+    s.add_argument("--incident-end-col", default=None,
+                   help="override the window end column name in the incidents CSV. "
+                        "Defaults to --end-col.")
     s.add_argument("--label", default=None, help="subdirectory name under --out")
     s.add_argument("--out", default=str(OUT_DIR / "check"))
     s.set_defaults(fn=cmd_check)
