@@ -13,8 +13,14 @@ Each function maps to a numbered section of SPEC.md:
 
 The "degenerate" column reproduces the rule used for Table 12 / metric_reconciliation.csv
 in the IEEE Access article: AUC-ROC <= 0.55 and F1 >= 0.95 x predict-all F1.
+
+Every check reports one of three states rather than two. A fold whose labels carry one
+class only cannot support any of these checks, so each check says it could not be evaluated
+and the row is INSUFFICIENT. Passing is never the default.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pandas as pd
@@ -25,6 +31,33 @@ FLOOR_MARGIN = 0.05             # section 8b, "stated margin" used by this packa
 RECALL_SATURATION = 0.95        # section 8b, "recall near saturation"
 DEGENERATE_AUC = 0.55           # article rule (Table 12)
 DEGENERATE_F1_RATIO = 0.95      # article rule (Table 12)
+
+NOT_EVALUABLE = "not evaluable"
+
+# The columns of fdes_checks.csv, in order. check_row also returns the per-check states and
+# the reason a row could not be evaluated. Those are structured values rather than table
+# cells, so they stay out of the CSV and travel in pilot_result.json instead.
+CSV_FIELDS = ("prevalence", "f1_predict_all", "f1_score", "f1_minus_floor", "recall",
+              "auc_roc", "auc_random_reference", "pr_auc", "pr_random_reference",
+              "sec8a_auc_at_or_below_random", "sec8b_flag_everything",
+              "degenerate_table12_rule", "fdes_verdict")
+
+
+def check_state(fired: bool, can_evaluate: bool) -> str:
+    """One check, in one of three states. Passing is not the default."""
+    if not can_evaluate:
+        return NOT_EVALUABLE
+    return "EXCLUDE" if fired else "pass"
+
+
+def is_number(value) -> bool:
+    """True when a metric arrived as a real number rather than as nan or nothing."""
+    if value is None:
+        return False
+    try:
+        return not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def predict_all_f1(prevalence: float) -> float:
@@ -44,26 +77,60 @@ def flag_everything(f1: float, recall: float, floor: float) -> bool:
 
 def check_row(prevalence: float, f1: float, recall: float, auc_roc: float,
               pr_auc: float | None = None) -> dict:
-    """Apply the section 7 and 8 checks to one (detector, signal, fold) result."""
+    """Apply the section 7 and 8 checks to one (detector, signal, fold) result.
+
+    A fold whose labels carry one class only cannot support these checks. Precision, recall
+    and F1 carry no information there, and no rank metric is defined, so AUC-ROC arrives as
+    nan or as a placeholder. Comparing nan with 0.5 is False, which would have read as a
+    check that passed, so a row like that is INSUFFICIENT and every check on it reports that
+    it could not be evaluated.
+    """
     floor = predict_all_f1(prevalence)
-    sec8a = bool(auc_roc <= RANDOM_AUC_REFERENCE)
-    sec8b = flag_everything(f1, recall, floor)
-    degenerate = bool(auc_roc <= DEGENERATE_AUC and f1 >= DEGENERATE_F1_RATIO * floor)
-    verdict = "EXCLUDE" if (sec8a or sec8b) else "PASS"
+    both_classes = bool(0.0 < float(prevalence) < 1.0)
+    # Section 8a needs a real threshold-independent score to compare against 0.5.
+    sec8a_evaluable = bool(both_classes and is_number(auc_roc))
+    sec8a = bool(sec8a_evaluable and float(auc_roc) <= RANDOM_AUC_REFERENCE)
+    sec8b = bool(both_classes and flag_everything(f1, recall, floor))
+    degenerate = bool(sec8a_evaluable and float(auc_roc) <= DEGENERATE_AUC
+                      and f1 >= DEGENERATE_F1_RATIO * floor)
+    status = {
+        "sec8a_auc_at_or_below_random": check_state(sec8a, sec8a_evaluable),
+        "sec8b_flag_everything": check_state(sec8b, both_classes),
+    }
+    reason = None
+    if not both_classes:
+        reason = (f"The evaluated labels carry one class only (prevalence "
+                  f"{round(float(prevalence), 4)}). Either no window or every window is "
+                  f"anomalous, so precision, recall and F1 carry no information and no rank "
+                  f"metric is defined.")
+    elif not sec8a_evaluable:
+        reason = ("No threshold-independent score reached this row, so there is nothing to "
+                  "compare against the random reference and section 8a could not be "
+                  "applied.")
+    # An exclusion that did fire is a real finding, so it outranks a check that could not be
+    # applied. Everything else with an unapplied check is INSUFFICIENT, never PASS.
+    if sec8a or sec8b:
+        verdict = "EXCLUDE"
+    elif NOT_EVALUABLE in status.values():
+        verdict = "INSUFFICIENT"
+    else:
+        verdict = "PASS"
     return {
         "prevalence": round(float(prevalence), 4),
         "f1_predict_all": round(floor, 4),
         "f1_score": round(float(f1), 4),
         "f1_minus_floor": round(float(f1) - floor, 4),
         "recall": round(float(recall), 4),
-        "auc_roc": round(float(auc_roc), 4),
+        "auc_roc": round(float(auc_roc), 4) if is_number(auc_roc) else None,
         "auc_random_reference": RANDOM_AUC_REFERENCE,
-        "pr_auc": None if pr_auc is None else round(float(pr_auc), 4),
+        "pr_auc": round(float(pr_auc), 4) if is_number(pr_auc) else None,
         "pr_random_reference": round(float(prevalence), 4),
         "sec8a_auc_at_or_below_random": sec8a,
         "sec8b_flag_everything": sec8b,
         "degenerate_table12_rule": degenerate,
         "fdes_verdict": verdict,
+        "check_status": status,
+        "not_evaluable_reason": reason,
     }
 
 
@@ -76,7 +143,8 @@ def checks_from_model_results(model_results: pd.DataFrame) -> pd.DataFrame:
     for r in model_results.itertuples(index=False):
         p = r.true_anomalies / max(int(r.total_samples), 1)
         c = check_row(p, r.f1_score, r.recall, r.auc_roc, getattr(r, "pr_auc", None))
-        rows.append({"model": r.model, "signal_type": r.signal_type, "fold": int(r.fold), **c})
+        rows.append({"model": r.model, "signal_type": r.signal_type, "fold": int(r.fold),
+                     **{k: c[k] for k in CSV_FIELDS}})
     return pd.DataFrame(rows)
 
 
@@ -94,11 +162,14 @@ def checks_from_scores(y: np.ndarray, scores: np.ndarray, threshold: float) -> d
     ap = average_precision_score(y, s) if 0 < y.sum() < len(y) else float("nan")
     out = check_row(p, f1, recall, auc, ap)
     out["mean_predicted_rate"] = round(float(preds.mean()), 4)
-    out["pr_lift_normalized"] = round((ap - p) / (1 - p), 4) if (1 - p) > 0 else None
+    lift = (ap - p) / (1 - p) if (1 - p) > 0 else None
+    out["pr_lift_normalized"] = round(lift, 4) if is_number(lift) else None
     from .vus import vus_from_scores
     v = vus_from_scores(y, s)
-    out["vus_pr"] = round(v["vus_pr"], 4)
-    out["vus_roc"] = round(v["vus_roc"], 4)
+    # VUS is nan on a single-class vector for the same reason AUC-ROC is. Say so with a
+    # missing value rather than with a number-shaped nan.
+    out["vus_pr"] = round(v["vus_pr"], 4) if is_number(v["vus_pr"]) else None
+    out["vus_roc"] = round(v["vus_roc"], 4) if is_number(v["vus_roc"]) else None
     out["vus_buffer"] = v["vus_buffer"]
     return out
 

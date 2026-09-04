@@ -9,7 +9,7 @@
 #   make verify MODE=full
 #   make pilot          run the example detector plugin under the FDES procedure
 #   make check          run the FDES checks on your own alert or score CSVs (no Zenodo needed)
-#   make test           unit tests for the check path (no Zenodo needed)
+#   make test           unit tests for the check and pilot paths (no Zenodo needed)
 #   make docker-build / docker-smoke
 
 PYTHON ?= python3

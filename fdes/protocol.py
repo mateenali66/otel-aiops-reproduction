@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from .checks import checks_from_scores
+from .checks import NOT_EVALUABLE, checks_from_scores, is_number
 
 SIGNAL_FILES = {
     "metrics": "metrics_features.parquet",
@@ -161,27 +161,62 @@ def run_pilot(training, detector, signal: str, fold_id: int, features_dir: Path,
     return result
 
 
+def _fmt(value, digits: int = 3) -> str:
+    """Format a metric, or say it was not computed when it never arrived as a number."""
+    return f"{float(value):.{digits}f}" if is_number(value) else "NOT COMPUTED"
+
+
 def render_report(r: dict) -> str:
     c, m = r["fdes_checks"], r["metrics_cooldown_excluded"]
+    status = c.get("check_status", {})
+    # A check that could not be applied is reported as such, and so is the metric behind it.
+    # The evaluation code hands back 0.0 for an undefined AUC-ROC, so the check state and not
+    # the number decides what each row is allowed to say.
+    sec8a_state = status.get("sec8a_auc_at_or_below_random", "pass")
+    sec8b_state = status.get("sec8b_flag_everything", "pass")
+    rank_evaluated = sec8a_state != NOT_EVALUABLE
+    point_evaluated = sec8b_state != NOT_EVALUABLE
+
     lines = [
         f"# FDES v1.0.0-draft pilot report: {r['detector']} on {r['signal']} (fold {r['fold']})",
         "",
         f"Verdict: **{r['verdict']}**",
         "",
+    ]
+    if c.get("not_evaluable_reason"):
+        lines += ["This run could not be evaluated. No check below was applied, and nothing "
+                  "here says anything about the detector.",
+                  "",
+                  c["not_evaluable_reason"],
+                  ""]
+
+    floor_result = (f"F1 minus floor = {c['f1_minus_floor']:+.3f}" if point_evaluated
+                    else NOT_EVALUABLE)
+    roc_value = f"AUC-ROC = {_fmt(m['auc_roc'])}" if rank_evaluated else "NOT COMPUTED"
+    pr_value = f"PR-AUC = {_fmt(m['pr_auc'])}" if rank_evaluated else "NOT COMPUTED"
+    vus_computed = is_number(c["vus_pr"]) and is_number(c["vus_roc"])
+    vus_value = (f"VUS-PR = {_fmt(c['vus_pr'])}, VUS-ROC = {_fmt(c['vus_roc'])}"
+                 if vus_computed else "NOT COMPUTED")
+    vus_reference = f"buffer = {c['vus_buffer']} windows" if vus_computed else ""
+    table12 = ("degenerate" if c["degenerate_table12_rule"] else "not degenerate") \
+        if rank_evaluated else NOT_EVALUABLE
+
+    lines += [
         "| Check | Section | Value | Reference | Result |",
         "|---|---|---|---|---|",
-        f"| Predict-all F1 floor | 2, 7 | F1 = {m['f1_score']:.3f} | floor = {c['f1_predict_all']:.3f} "
-        f"(p = {c['prevalence']:.3f}) | F1 minus floor = {c['f1_minus_floor']:+.3f} |",
-        f"| Threshold-independent (ROC) | 6, 8a | AUC-ROC = {m['auc_roc']:.3f} | 0.5 | "
-        f"{'EXCLUDE' if c['sec8a_auc_at_or_below_random'] else 'pass'} |",
-        f"| Threshold-independent (PR) | 6, 7 | PR-AUC = {m['pr_auc']:.3f} | p = {c['pr_random_reference']:.3f} | "
-        f"normalised lift = {c['pr_lift_normalized']} |",
-        f"| Range-based (VUS) | 6 | VUS-PR = {c['vus_pr']:.3f}, VUS-ROC = {c['vus_roc']:.3f} | "
-        f"buffer = {c['vus_buffer']} windows | reported |",
-        f"| Flag-everything guard | 8b | recall = {m['recall']:.3f}, predicted rate = {c['mean_predicted_rate']:.3f} | "
-        f"F1 within 5% of floor and recall >= 0.95 | {'EXCLUDE' if c['sec8b_flag_everything'] else 'pass'} |",
+        f"| Predict-all F1 floor | 2, 7 | F1 = {_fmt(m['f1_score'])} | "
+        f"floor = {c['f1_predict_all']:.3f} (p = {c['prevalence']:.3f}) | {floor_result} |",
+        f"| Threshold-independent (ROC) | 6, 8a | {roc_value} | 0.5 | {sec8a_state} |",
+        f"| Threshold-independent (PR) | 6, 7 | {pr_value} | "
+        f"p = {c['pr_random_reference']:.3f} | normalised lift = "
+        f"{c['pr_lift_normalized'] if c['pr_lift_normalized'] is not None else 'NOT COMPUTED'} |",
+        f"| Range-based (VUS) | 6 | {vus_value} | {vus_reference} | "
+        f"{'reported' if vus_computed else NOT_EVALUABLE} |",
+        f"| Flag-everything guard | 8b | recall = {_fmt(m['recall'])}, "
+        f"predicted rate = {c['mean_predicted_rate']:.3f} | "
+        f"F1 within 5% of floor and recall >= 0.95 | {sec8b_state} |",
         f"| Degenerate (article Table 12 rule) | 8 | AUC <= 0.55 and F1 >= 0.95 x floor | | "
-        f"{'degenerate' if c['degenerate_table12_rule'] else 'not degenerate'} |",
+        f"{table12} |",
         "",
         f"The threshold was selected on validation repetition {r['fold_assignment']['val']} (section 5 step 2). "
         f"Test repetitions were {r['fold_assignment']['test']}. The seed was {r['seed']} (base 42 + fold).",
