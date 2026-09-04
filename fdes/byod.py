@@ -1055,8 +1055,18 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
             # carry what the detector got right, or an operator reads "EXCLUDE" plus a
             # sentence about alert volume and concludes the thing does not detect anything.
             lift = (pm["f1_score"] / floor) if floor else None
-            found_things = bool((lift is not None and lift > 1.0)
-                                or pm["recall"] >= RECALL_SATURATION)
+            # The near-floor notice already owns the band around a lift of 1.0, where it
+            # says the detector scores about what flagging every bucket would score. The
+            # counterweight used to start at a bare lift of 1.0, so the overlap printed
+            # both, a few lines apart, about the same number, saying opposite things. On
+            # real data a lift of 1.04 got "the detector is finding incidents" alongside
+            # "scores about what flagging every bucket would score". Inside that band the
+            # near-floor sentence is the honest one, so the counterweight stays quiet.
+            near_the_floor = bool(lift is not None
+                                  and abs(lift - 1.0) <= NEAR_FLOOR_BAND)
+            found_things = bool(not near_the_floor
+                                and ((lift is not None and lift > 1.0)
+                                     or pm["recall"] >= RECALL_SATURATION))
             counterweight = ""
             if found_things:
                 bits = []
