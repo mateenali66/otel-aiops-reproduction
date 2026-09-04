@@ -482,6 +482,28 @@ def cmd_verify_archive(args) -> None:
 # support a verdict either way, which is a problem with the input and not with the detector.
 # Both the pilot path and the check path use them.
 VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3, "UNSTABLE": 4}
+# A PASS that only exists because an exclusion was suppressed, or that sits on a detector
+# alerting far more often than there were incidents to find, is not a plain PASS. It gets its
+# own code so a script can tell the two apart. Whether to fail on it is the reader's call:
+# treat 5 as passing if the report's caveat is acceptable on your on-call load, and as
+# failing if it is not.
+QUALIFIED_PASS_EXIT = 5
+
+
+class Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, and 2 is this tool's code for EXCLUDE.
+
+    A reviewer hit this live. A shell quoting mistake split a flag, argparse rejected it and
+    exited 2, and nine runs looked like nine EXCLUDE verdicts. It was caught only because no
+    output files had been written. A usage error is not a verdict, so it exits 1.
+    """
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"\n{self.prog}: {message}\n"
+                         f"This is a usage error, not a verdict. Exit 1 means the command "
+                         f"was wrong. Verdicts use 0, 2, 3, 4 and 5.\n")
+        sys.exit(1)
 # A real failure exits 1 and nothing else does, so 2 is never a crash. Continuous
 # integration reads 2 as "this detector was rejected" and 1 as "this command broke".
 EXIT_ERROR = 1
@@ -560,14 +582,16 @@ def cmd_check(args) -> None:
     # the text saying so. A suppressed UNSTABLE exits as UNSTABLE.
     if result.get("results", {}).get("sweep_suppressed_unstable"):
         sys.exit(VERDICT_EXIT_CODES["UNSTABLE"])
+    if result["verdict"] == "PASS" and result.get("results", {}).get("pass_qualified"):
+        sys.exit(QUALIFIED_PASS_EXIT)
     sys.exit(VERDICT_EXIT_CODES[result["verdict"]])
 
 
 # --------------------------------------------------------------------------- main
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
 
     s = sub.add_parser("fetch"); s.add_argument("--from-zip", default=None,
                                                help="use a local copy of otel-aiops-benchmark.zip instead of downloading")

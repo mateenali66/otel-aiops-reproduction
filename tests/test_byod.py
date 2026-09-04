@@ -23,6 +23,8 @@ sys.path.insert(0, str(ROOT))
 
 from fdes import byod  # noqa: E402
 
+VERDICT_EXIT_EXCLUDE = 2
+
 # One day at one minute buckets: 1440 buckets, easy to reason about by hand.
 DAY_FROM = "2026-03-01T00:00:00Z"
 DAY_TO = "2026-03-02T00:00:00Z"
@@ -562,7 +564,7 @@ class TestAlertRateCurve(TempCase):
         good = self.oncall("1h")["results"]
         bad = self.abusive(1)["results"]
         self.assertLess(bad["alert_duty_cycle"], good["alert_duty_cycle"])
-        self.assertGreater(bad["alerts_per_hour"], good["alerts_per_hour"] * 20)
+        self.assertGreater(bad["alerts_per_incident"], good["alerts_per_incident"] * 20)
         self.assertEqual(self.oncall("1h")["verdict"], "PASS")
 
     def test_neither_suppression_gate_holds_on_its_own(self):
@@ -570,12 +572,57 @@ class TestAlertRateCurve(TempCase):
         # and thinning the alerts to get under the rate per hour pushes the leverage over.
         tuned = self.abusive(6)["results"]
         self.assertLessEqual(tuned["alert_rate_leverage"], byod.SUPPRESSION_MAX_LEVERAGE)
-        self.assertGreater(tuned["alerts_per_hour"], byod.SUPPRESSION_MAX_ALERTS_PER_HOUR)
+        self.assertGreater(tuned["alerts_per_incident"], byod.ALERTS_PER_INCIDENT_LIMIT)
         self.assertFalse(tuned["alert_rate_quantised"])
-        thin = self.abusive(1, rows=719)["results"]
-        self.assertLessEqual(thin["alerts_per_hour"], byod.SUPPRESSION_MAX_ALERTS_PER_HOUR)
+        thin = self.abusive(1, rows=200)["results"]
+        self.assertLessEqual(thin["alerts_per_incident"], byod.ALERTS_PER_INCIDENT_LIMIT)
         self.assertGreater(thin["alert_rate_leverage"], byod.SUPPRESSION_MAX_LEVERAGE)
         self.assertFalse(thin["alert_rate_quantised"])
+
+    def test_a_small_export_is_not_called_dominated_by_arithmetic(self):
+        # Two or three rows trip a 30 percent share whenever they are not near-identical, so
+        # any small export produced a false positive. Reported as not applicable instead.
+        for n in (2, 3, 4):
+            rows = "".join(f"2026-03-01T{2 + k:02d}:00:00Z,2026-03-01T{2 + k:02d}:{k * 9:02d}:00Z\n"
+                           for k in range(1, n + 1))
+            alerts = write(self.tmp, f"small_{n}.csv", "start,end\n" + rows)
+            r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
+                                  sweep=False)
+            self.assertFalse(r["results"]["alert_concentration"]["dominated"], n)
+
+    def test_alerting_far_more_often_than_there_were_incidents_is_reported(self):
+        # Nothing else in the procedure measures how often a detector pages. Both reviewers
+        # reached that from opposite ends, one by walking through the guard and one by
+        # finding a clean PASS on a detector alerting 174 times a day.
+        r = self.abusive(1, rows=600)
+        res = r["results"]
+        self.assertGreater(res["alerts_per_incident"], byod.ALERTS_PER_INCIDENT_LIMIT)
+        self.assertTrue(res["high_alert_volume"])
+        report = byod.render_report(r)
+        self.assertIn("times for every incident there was to find", report)
+        self.assertIn("Nothing above measures that", report)
+        self.assertIn("judgement about your on-call load", report)
+
+    def test_a_pass_carrying_a_caveat_is_marked_and_gets_its_own_exit_code(self):
+        # A reader who only sees the exit code could not tell a clean PASS from one that
+        # exists because an exclusion was suppressed.
+        r = self.oncall("1h")
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertTrue(r["results"]["alert_rate_quantised"])
+        self.assertTrue(r["results"]["pass_qualified"])
+        clean = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n", sweep=False)
+        self.assertEqual(clean["verdict"], "PASS")
+        self.assertFalse(clean["results"]["pass_qualified"])
+
+    def test_a_usage_error_does_not_look_like_a_verdict(self):
+        # A shell quoting mistake split a flag, argparse exited 2, and nine runs read as nine
+        # EXCLUDE verdicts. It was caught only because no output files had been written.
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--no-such-flag"],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("usage error, not a verdict", p.stderr)
+        self.assertNotEqual(p.returncode, VERDICT_EXIT_EXCLUDE)
 
     def test_the_check_table_does_not_say_pass_when_the_guard_stood_down(self):
         # The prose said "was not applied" while the table one line below said "pass" for the
@@ -721,10 +768,15 @@ class TestReportedDefects(TempCase):
         # There was a dominant-incident-row check and no equivalent on the alert side, even
         # though the alerted rate is what the flag-everything guard reads. One unresolved row
         # can carry a verdict by itself.
+        # Five rows minimum, because with two or three one of them owns most of the time by
+        # arithmetic whatever the detector did, which produced false positives on any small
+        # export.
         alerts = write(self.tmp, "dom_a.csv",
                        "start,end\n"
                        "2026-03-01T02:00:00Z,2026-03-01T02:10:00Z\n"
                        "2026-03-01T04:00:00Z,2026-03-01T04:10:00Z\n"
+                       "2026-03-01T05:00:00Z,2026-03-01T05:10:00Z\n"
+                       "2026-03-01T05:30:00Z,2026-03-01T05:40:00Z\n"
                        "2026-03-01T06:00:00Z,2026-03-01T14:00:00Z\n")
         r = byod.check_alerts(alerts, self.incidents, "5m", t_from=DAY_FROM, t_to=DAY_TO,
                               sweep=False)

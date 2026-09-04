@@ -1,5 +1,75 @@
 # Changelog
 
+## [1.3.5] - 2026-09-04
+
+Two reviewers reported on the same day and reached the same conclusion from opposite ends.
+One walked through the suppression gate, the other found a clean PASS on a detector alerting
+174 times a day where the suppression was never involved. **Nothing in this procedure
+measured how often a detector pages.** Bucket occupancy does not, because a window shorter
+than the bucket claims the whole bucket. The duty cycle does not, because a detector paging
+173 times a day in one-second bursts occupies less of the timeline than one paging 6 times a
+day for a minute each.
+
+### Fixed
+
+- **The alert-volume gate is a ratio, not a rate per clock hour.** The per-hour gate added in
+  1.3.4 was wrong twice over. It stepped: 720 alerts in a month passed and 726 excluded, with
+  the leverage, duty cycle, precision and recall identical to three decimals. That is the
+  same defect class the guard itself took four rounds to lose, reintroduced in the gate
+  protecting it. And it was an average, so clustering laundered it: three alerts in every
+  third hour averages to 0.99 an hour and pages in bursts, which is the normal shape of a
+  flapping detector rather than an exotic one. One alert an hour also is not "occasional",
+  which was the whole argument for the constant. It is a page every hour of every day for a
+  month.
+
+  `ALERTS_PER_INCIDENT_LIMIT` (50) replaces it. A ratio moves with the data, and it orders
+  the known cases correctly where every time-based measure ordered them backwards: 31 for a
+  detector worth keeping, 120 and 355 for two that are not.
+
+- **Alert volume is now reported in its own right, not only as a suppression gate.** The
+  false PASS found on real data did not involve the suppression at all. The detector's duty
+  cycle genuinely cleared the guard relative to prevalence, and it alerted 174 times a day at
+  a precision of 0.27. No check touched it because no check measured that. Above the limit
+  the report now says how many times the detector alerted for each incident there was to
+  find, says plainly that nothing above measures it, and hands the judgement back.
+
+- **A PASS carrying a caveat says so, and has its own exit code.** Both reviewers asked for
+  this independently. A PASS that exists because an exclusion was suppressed, or that sits on
+  a detector alerting far above the volume limit, sets `pass_qualified` and exits 5 rather
+  than 0. Whether to fail on 5 is the reader's call. Treat it as passing if the report's
+  caveat is acceptable on your on-call load and as failing if it is not. The point is that
+  the exit code stops hiding the difference.
+
+- **A usage error no longer looks like a verdict.** argparse exits 2 on a bad flag and 2 is
+  this tool's code for EXCLUDE. A reviewer hit it live: a shell quoting mistake split a flag,
+  and nine runs read as nine EXCLUDE verdicts, caught only because no output files had been
+  written. Usage errors exit 1 and say so.
+
+- **The dominant-alert-window check needs five rows.** The 30 percent share was absolute, so
+  on two or three rows one of them owns most of the alerted time by arithmetic whatever the
+  detector did. Two-row and three-row exports produced false positives. Below
+  `DOMINANT_ALERT_MIN_ROWS` it is not applicable rather than a finding.
+
+- **The scope assumption line was still one-sided.** The prominent notice covered both
+  directions after 1.3.3 and the assumption summary still named only the alert direction. It
+  now names both and says they fail differently, one as false positives and one as false
+  negatives.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. All six bundled examples keep their documented exit codes.
+213 tests pass.
+
+### A note on the constant
+
+`ALERTS_PER_INCIDENT_LIMIT` is 50 and it is still a constant. A ratio removes the flat region
+and the clustering hole, and it does not remove the step at the threshold. The known
+reference points are 31, 120 and 355, so 50 sits between the only real evidence there is.
+That is a weaker basis than the guard curve has and it is recorded here rather than
+presented as settled.
+
 ## [1.3.4] - 2026-09-04
 
 ### Fixed
