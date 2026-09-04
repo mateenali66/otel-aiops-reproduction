@@ -161,6 +161,293 @@ class TestFlagEverything(TempCase):
         self.assertEqual(r["verdict"], "EXCLUDE")
         self.assertTrue(r["results"]["degenerate_output"]["alerts_on_everything"])
 
+    def test_alerting_on_most_of_the_range_is_excluded_even_when_f1_clears_the_floor(self):
+        # The numbers a real Splunk and PagerDuty export produced. F1 sits 5.6 percent
+        # above the floor, which is outside the two-sided section 8b margin by six tenths
+        # of a percentage point, so nothing used to exclude it and it reported PASS.
+        r = self.real_flag_everything()
+        res = r["results"]
+        self.assertAlmostEqual(res["prevalence"], 0.0431, places=4)
+        self.assertAlmostEqual(res["f1_score"], 0.0871, places=4)
+        self.assertAlmostEqual(res["f1_predict_all"], 0.0826, places=4)
+        self.assertEqual(res["recall"], 1.0)
+        self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.9451, places=4)
+        # The old rule really does miss it, and the new one really does catch it.
+        self.assertFalse(res["checks"]["sec8b_flag_everything"])
+        self.assertFalse(res["checks"]["no_lift_over_predict_all"])
+        self.assertFalse(res["checks"]["degenerate_output"])
+        self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "EXCLUDE")
+
+    def test_the_reason_names_the_alerted_rate_and_the_prevalence(self):
+        r = self.real_flag_everything()
+        reasons = " ".join(r["results"]["exclusion_reasons"])
+        self.assertIn("94.5 percent", reasons)
+        self.assertIn("4.3 percent", reasons)
+        self.assertIn("22 times as often", reasons)
+        report = byod.render_report(r)
+        self.assertIn("| Alerted rate against prevalence | 8b | alerted rate = 0.945", report)
+
+    def test_a_perfect_detector_still_passes(self):
+        # A perfect detector alerts exactly as often as things are anomalous, so the
+        # alerted rate equals prevalence and the guard cannot reach it. This is the case
+        # the one-sided version of section 8b used to exclude.
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        res = r["results"]
+        self.assertEqual(res["f1_score"], 1.0)
+        self.assertEqual(res["recall"], 1.0)
+        self.assertEqual(res["degenerate_output"]["alerted_rate"], res["prevalence"])
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_a_perfect_detector_passes_when_most_of_the_day_is_anomalous(self):
+        # Prevalence 0.6, so a perfect detector alerts on 60 percent of the wall-clock
+        # time. The alerted rate alone would condemn it. Measured against prevalence it
+        # is exactly right, so it keeps its PASS.
+        busy = write(self.tmp, "busy_incidents.csv",
+                     "start,end\n2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n")
+        r = self.alerts("2026-03-01T00:00:00Z,2026-03-01T14:24:00Z\n", incidents=busy)
+        res = r["results"]
+        self.assertAlmostEqual(res["prevalence"], 0.6, places=4)
+        self.assertEqual(res["f1_score"], 1.0)
+        self.assertGreater(res["degenerate_output"]["alerted_rate"],
+                           byod.ALERT_RATE_SATURATION)
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_a_detector_that_alerts_often_on_rare_incidents_is_not_condemned_for_it(self):
+        # Ten times prevalence, but only 6 percent of the wall-clock time. The alerted
+        # rate has to be high in absolute terms as well as high against prevalence.
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n"
+                        "2026-03-01T20:00:00Z,2026-03-01T20:10:00Z\n")
+        res = r["results"]
+        self.assertLess(res["degenerate_output"]["alerted_rate"],
+                        byod.ALERT_RATE_SATURATION)
+        self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "PASS")
+
+    def test_the_guard_applies_in_scores_mode_too(self):
+        # The score ranks the buckets well, so section 8a is quiet and AUC-ROC is high.
+        # The operating point still alerts on 94.5 percent of the day, and that alone
+        # settles it. A detector flagging that much time cannot reach PASS by any path.
+        incidents = write(self.tmp, "one_incident.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T03:02:00Z\n")
+        t0 = byod.parse_bound(DAY_FROM, "from")
+        rows = []
+        for i in range(N_BUCKETS):
+            if 120 <= i < 182:
+                value = 0.9
+            elif i < 1361:
+                value = 0.8
+            else:
+                value = 0.1
+            rows.append((t0 + i * 60, value))
+        text = "timestamp,score\n" + "".join(f"{t},{v}\n" for t, v in rows)
+        path = write(self.tmp, "saturated_scores.csv", text)
+        r = byod.check_scores(path, incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO,
+                              threshold=0.5)
+        res = r["results"]
+        self.assertGreater(res["auc_roc"], 0.9)
+        self.assertFalse(res["checks"]["sec8a_auc_at_or_below_random"])
+        self.assertFalse(res["checks"]["sec8b_flag_everything"])
+        self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
+        self.assertEqual(r["verdict"], "EXCLUDE")
+
+    def real_flag_everything(self):
+        """One incident of 62 minutes, and a detector alerting for 1361 of the 1440.
+
+        Prevalence 0.0431, alerted rate 0.9451, recall 1.0, precision 0.0456, F1 0.0871
+        against a floor of 0.0826.
+        """
+        incidents = write(self.tmp, "one_incident.csv",
+                          "start,end\n2026-03-01T02:00:00Z,2026-03-01T03:02:00Z\n")
+        return self.alerts("2026-03-01T00:00:00Z,2026-03-01T22:41:00Z\n",
+                           incidents=incidents)
+
+
+class TestNearTheFloor(TempCase):
+    """A lift near 1.0 is a verdict that moves with the bucket size, so the report says so.
+
+    On one real export the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes and the
+    verdict flipped from PASS to EXCLUDE across them. The numbers never left the
+    neighbourhood of the floor. The bucket size is a parameter the user picks.
+    """
+
+    def near_the_floor(self):
+        """F1 0.125 against a floor of 0.1176, so the lift is 1.06.
+
+        The detector catches the second incident whole, misses the first, and fires for
+        six clean hours. It alerts on 27 percent of the day, so no other guard reaches it.
+        """
+        return self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:00:00Z\n"
+                           "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+
+    def test_a_lift_near_one_is_reported_as_near_the_floor(self):
+        r = self.near_the_floor()
+        res = r["results"]
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertAlmostEqual(res["f1_over_floor"], 1.0625, places=3)
+        self.assertTrue(res["near_floor"])
+        self.assertEqual(res["near_floor_band"], byod.NEAR_FLOOR_BAND)
+
+    def test_the_notice_sits_with_the_verdict_and_names_other_buckets(self):
+        report = byod.render_report(self.near_the_floor())
+        notice = report.index("Near the floor.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+        body = report[notice:notice + 700]
+        self.assertIn("not stable", body)
+        self.assertIn("--bucket", body)
+        self.assertIn("15m", body)
+
+    def test_a_detector_well_clear_of_the_floor_gets_no_notice(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:05:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        self.assertGreater(r["results"]["f1_over_floor"], 1 + byod.NEAR_FLOOR_BAND)
+        self.assertFalse(r["results"]["near_floor"])
+        self.assertNotIn("Near the floor.", byod.render_report(r))
+
+    def test_a_detector_just_below_the_floor_is_also_near_it(self):
+        # The band is two sided. A lift of 0.9 is as unstable as a lift of 1.1.
+        r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        res = r["results"]
+        self.assertLess(res["f1_over_floor"], 1.0)
+        self.assertGreater(res["f1_over_floor"], 1 - byod.NEAR_FLOOR_BAND)
+        self.assertTrue(res["near_floor"])
+        self.assertIn("Near the floor.", byod.render_report(r))
+
+    def test_a_run_that_cannot_be_evaluated_gets_no_notice(self):
+        outside = write(self.tmp, "incidents_outside.csv", INCIDENTS_OUTSIDE)
+        r = self.alerts(OVERLAPPING_ALERTS, incidents=outside)
+        self.assertFalse(r["results"]["near_floor"])
+        self.assertNotIn("Near the floor.", byod.render_report(r))
+
+
+class TestPointEventFallback(TempCase):
+    """Reading every row as a point event is an interpretation, so it goes with the verdict.
+
+    A realistic Splunk export carries `_time`, `_indextime`, `earliest` and `latest`. The
+    tool takes `_time`, recognises none of the rest as an end, and reads every row as an
+    instant. That choice can decide the verdict on its own, and it used to appear only as
+    one line in the assumption list below the table.
+    """
+
+    SPLUNK = ("_time,_indextime,earliest,latest\n"
+              "2026-03-01T02:00:00Z,2026-03-01T02:00:05Z,2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
+              "2026-03-01T14:00:00Z,2026-03-01T14:00:04Z,2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+
+    def splunk_alerts(self, **kwargs):
+        path = write(self.tmp, "splunk_alerts.csv", self.SPLUNK)
+        opts = dict(t_from=DAY_FROM, t_to=DAY_TO)
+        opts.update(kwargs)
+        return byod.check_alerts(path, self.incidents, BUCKET, **opts)
+
+    def test_the_fallback_is_reported_next_to_the_verdict(self):
+        report = byod.render_report(self.splunk_alerts())
+        notice = report.index("Point events assumed.")
+        self.assertLess(notice, report.index("| Check | Section |"))
+        self.assertLess(notice, report.index("Timeline 2026-03-01"))
+
+    def test_the_notice_names_the_columns_it_did_see(self):
+        r = self.splunk_alerts()
+        self.assertEqual(r["inputs"]["alerts"]["columns"],
+                         ["_time", "_indextime", "earliest", "latest"])
+        body = byod.render_report(r)
+        body = body[body.index("Point events assumed."):]
+        for column in ("_time", "_indextime", "earliest", "latest"):
+            self.assertIn(f"`{column}`", body[:900])
+        self.assertIn("--end-col", body[:900])
+
+    def test_naming_the_end_column_removes_the_notice_and_changes_the_result(self):
+        guessed = self.splunk_alerts()
+        named = self.splunk_alerts(end_col="latest", incident_start_col="start",
+                                   incident_end_col="end")
+        self.assertTrue(guessed["inputs"]["alerts"]["point_events"])
+        self.assertFalse(named["inputs"]["alerts"]["point_events"])
+        self.assertNotIn("Point events assumed.", byod.render_report(named))
+        # Two instants cover 2 buckets. The real windows cover all 90 anomalous ones.
+        self.assertEqual(guessed["results"]["tp"], 2)
+        self.assertEqual(named["results"]["tp"], N_ANOMALOUS)
+        self.assertEqual(named["verdict"], "PASS")
+
+    def test_the_incidents_file_is_told_to_use_its_own_flag(self):
+        splunk_incidents = write(self.tmp, "splunk_incidents.csv", self.SPLUNK)
+        r = byod.check_alerts(write(self.tmp, "alerts.csv", "start,end\n"
+                                    "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"),
+                              splunk_incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+        report = byod.render_report(r)
+        body = report[report.index("Point events assumed."):]
+        self.assertIn("--incident-end-col", body[:900])
+
+    def test_a_file_with_a_recognised_end_column_gets_no_notice(self):
+        r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n")
+        self.assertFalse(r["inputs"]["alerts"]["point_events"])
+        self.assertNotIn("Point events assumed.", byod.render_report(r))
+
+
+class TestSchemaFromTheHeader(TempCase):
+    """A file with a header and no rows still has the columns its header names."""
+
+    def test_a_zero_row_file_with_an_end_column_is_not_called_point_events(self):
+        r = self.alerts("")
+        note = r["inputs"]["alerts"]
+        self.assertEqual(note["rows"], 0)
+        self.assertEqual(note["columns"], ["start", "end"])
+        self.assertEqual(note["end_column"], "end")
+        self.assertFalse(note["point_events"])
+        report = byod.render_report(r)
+        self.assertNotIn("no end column", report)
+        self.assertNotIn("Point events assumed.", report)
+        # A detector that never fired is still a real result.
+        self.assertEqual(r["verdict"], "EXCLUDE")
+
+    def test_a_zero_row_file_with_no_end_column_still_says_point_events(self):
+        path = write(self.tmp, "starts_only.csv", "start\n")
+        r = byod.check_alerts(path, self.incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+        note = r["inputs"]["alerts"]
+        self.assertEqual(note["columns"], ["start"])
+        self.assertTrue(note["point_events"])
+        self.assertIn("Point events assumed.", byod.render_report(r))
+
+
+class TestZeroLengthWindows(TempCase):
+    """A window that ends when it starts covers no time, the same as one that ends first."""
+
+    def test_a_zero_length_window_is_refused(self):
+        with self.assertRaises(byod.InputError) as ctx:
+            self.alerts("2026-03-01T02:00:00Z,2026-03-01T02:00:00Z\n"
+                        "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
+        msg = str(ctx.exception)
+        self.assertIn("1 row(s) end at the same second they start", msg)
+        self.assertIn("'start'", msg)
+        self.assertIn("'end'", msg)
+        self.assertIn("start column only", msg)
+
+    def test_an_inverted_window_is_refused_the_same_way(self):
+        with self.assertRaises(byod.InputError) as ctx:
+            self.alerts("2026-03-01T03:00:00Z,2026-03-01T02:00:00Z\n")
+        msg = str(ctx.exception)
+        self.assertIn("1 row(s) end before they start", msg)
+        self.assertIn("'start'", msg)
+        self.assertIn("'end'", msg)
+
+    def test_the_incidents_file_is_checked_too(self):
+        broken = write(self.tmp, "zero_incidents.csv",
+                       "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:00:00Z\n")
+        with self.assertRaises(byod.InputError) as ctx:
+            self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n", incidents=broken)
+        self.assertIn("zero_incidents.csv", str(ctx.exception))
+
+    def test_point_events_are_not_read_as_zero_length_windows(self):
+        # A file with no end column has no end to disagree with, so it is not refused.
+        path = write(self.tmp, "points.csv", "start\n2026-03-01T02:00:00Z\n")
+        r = byod.check_alerts(path, self.incidents, BUCKET, t_from=DAY_FROM, t_to=DAY_TO)
+        self.assertTrue(r["inputs"]["alerts"]["point_events"])
+        self.assertEqual(r["results"]["tp"], 1)
+
 
 class TestAlertNothing(TempCase):
     def test_a_header_only_alert_export_is_excluded(self):
@@ -675,6 +962,44 @@ class TestCli(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True)
         self.assertIn("--incident-start-col", p.stdout)
         self.assertIn("--incident-end-col", p.stdout)
+
+    def test_the_exit_codes_are_documented_in_help(self):
+        # EXCLUDE exiting 2 reads as a crash to anyone wiring this into CI, so the codes
+        # are spelled out where a person looks first.
+        for command in ("check", "pilot"):
+            p = subprocess.run(
+                [sys.executable, str(ROOT / "bin" / "reproduce.py"), command, "--help"],
+                cwd=ROOT, capture_output=True, text=True)
+            self.assertIn("exit codes", p.stdout, command)
+            self.assertIn("0  PASS", p.stdout, command)
+            self.assertIn("1  the command failed", p.stdout, command)
+            self.assertIn("2  EXCLUDE", p.stdout, command)
+            self.assertIn("3  INSUFFICIENT", p.stdout, command)
+        top = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "reproduce.py"), "--help"],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertIn("Exit codes", top.stdout)
+
+    def test_no_verdict_shares_the_error_exit_code(self):
+        sys.path.insert(0, str(ROOT / "bin"))
+        import reproduce                                     # noqa: E402
+        self.assertNotIn(reproduce.EXIT_ERROR,
+                         set(reproduce.VERDICT_EXIT_CODES.values()))
+
+    def test_a_detector_that_alerts_on_most_of_the_range_exits_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "incidents.csv").write_text(
+                "start,end\n2026-03-01T02:00:00Z,2026-03-01T03:02:00Z\n")
+            (d / "alerts.csv").write_text(
+                "start,end\n2026-03-01T00:00:00Z,2026-03-01T22:41:00Z\n")
+            p = self.run_check("--alerts", str(d / "alerts.csv"),
+                               "--incidents", str(d / "incidents.csv"),
+                               "--bucket", "60s", "--from", "2026-03-01T00:00:00Z",
+                               "--to", "2026-03-02T00:00:00Z", "--out", str(d / "out"))
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("Verdict: **EXCLUDE**", p.stdout)
+            self.assertIn("94.5 percent", p.stdout)
 
     def test_two_exports_with_different_headers_run_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:

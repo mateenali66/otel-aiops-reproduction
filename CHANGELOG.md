@@ -10,8 +10,94 @@
   examples. See the README section "Checking your own detector".
 - `examples/`, sample CSVs including a deliberately useless detector, so the
   failure mode can be seen without exporting anything.
+- A second reading of FDES section 8b on the alerted rate, `alert_rate_saturated()`
+  in `fdes/checks.py`, applied by `check` as
+  `alert_rate_far_above_prevalence`. It fires when the detector alerts on at
+  least half the wall-clock time and at least four times as often as anything is
+  anomalous. The report gains a row for it and `check_result.json` gains the
+  check and its state.
+- A near-the-floor notice next to the verdict when the lift lands within 20
+  percent of 1.0 either way, with the lift, a plain statement that a result that
+  close to the floor is not stable, and a suggestion to re-run at other bucket
+  sizes. `check_result.json` carries it as `near_floor`.
+- A point-events notice next to the verdict when a window file is read as
+  instants because no end column was recognised. It names the columns the file
+  did have and the flag that fixes it. `check_result.json` now records the full
+  column list of every window file under `inputs`.
 
 ### Fixed
+- **A flag-everything detector reported PASS.** On a real Splunk and PagerDuty export the
+  tool returned `PASS` for a detector that alerted on 94.5 percent of the week. Prevalence
+  0.043, recall 1.00, precision 0.045, F1 0.087 against a predict-all floor of 0.082.
+
+  Section 8b excludes a detector whose F1 is within 5 percent of the floor while recall is
+  at or above 0.95. Recall was 1.0, but F1 sat 5.6 percent above the floor, which clears a
+  5 percent margin by six tenths of a percentage point, so the guard did not fire and
+  nothing else excluded it. At a 15 minute bucket the same detector alerted 95.4 percent of
+  the time and was correctly excluded, so the verdict turned on the bucket size. This is
+  the exact detector the procedure exists to catch.
+
+  The fix reads section 8b a second time, on the alerted rate against prevalence rather
+  than on F1 against the floor. A detector that works alerts about as often as things are
+  anomalous. A detector that flags everything alerts far more often than anything is wrong.
+  The guard fires when the alerted rate is at or above 0.5, so the detector spends the
+  majority of the wall-clock time alerting, and at or above four times prevalence. Both
+  conditions are needed. Without the first a rare-incident detector alerting on 1 percent of
+  the time at a prevalence of 0.001 would be condemned for working. Without the second a
+  perfect detector on data that is 60 percent anomalous would be condemned for the shape of
+  its data. The alerted rate over prevalence is recall over precision, so the multiple of
+  four says that at full recall no more than one alert in four lands on an incident.
+
+  The earlier one-sided form of section 8b excluded any detector with recall at or above
+  0.95 whatever its F1, which wrongly excluded a perfect detector. Making it two sided fixed
+  that and opened this hole. The new guard closes the hole without reopening that defect,
+  because a perfect detector has an alerted rate equal to prevalence and so cannot satisfy
+  the second condition at any prevalence. Both ends are tested.
+
+  **No published result changes.** The guard is applied on the `check` path only.
+  `tables/fdes_checks.csv` has no alerted-rate column and is compared byte for byte against
+  the recorded run, so adding one there would move archived output. Applying the same rule
+  to the 120 archived folds fires on none of them, so the two paths agree on the published
+  data. The archived alerted rate is available as `predicted_anomalies / total_samples` in
+  `expected/model_results_per_fold.csv` for anyone who wants to check that.
+- **The verdict moved with the bucket size and the report did not say so.** On the same
+  export the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes and the verdict flipped
+  between `PASS` and `EXCLUDE`, while the numbers never left the neighbourhood of 1.0. The
+  bucket size is a parameter the user picks arbitrarily.
+
+  A lift within 20 percent of 1.0 either way now gets its own line next to the verdict. It
+  gives the lift, says the detector scores about what flagging every bucket would score,
+  says plainly that a result this close to the floor is not stable and can move with the
+  bucket, and names other bucket sizes to try. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the
+  band.
+- **Guessing the schema flipped verdicts quietly.** A realistic Splunk export carries
+  `_time`, `_indextime`, `earliest` and `latest`. The tool recognised `_time` as a start,
+  recognised nothing as an end, and read every row as a point event covering one bucket.
+  On real data that turned a `PASS` into an `EXCLUDE` at three bucket sizes, and it was
+  disclosed only as one line in the assumption list below the verdict.
+
+  Reading every row as an instant is an interpretation of the input, so it now appears next
+  to the verdict. The notice names the file, the start column it used, the fact that no end
+  column was recognised, and the full list of columns the file did have, so `latest` sitting
+  unused is visible. It names `--end-col`, or `--incident-end-col` for the incidents file,
+  as the fix. Those flags already existed.
+- **An empty file was described by its rows instead of its header.** A zero-row CSV with a
+  valid `end` column in its header was reported as having a start column but no end column,
+  because the point-event decision was taken when the file had no rows. The schema is now
+  read off the header. A header with an end column means windows, however many rows follow.
+- **A zero-length window passed in silence.** A window that ends before it starts is refused
+  with a message naming the columns and the row count. A window that ends the same second it
+  starts covers no time in the same way and was marked onto one bucket without a word. It is
+  now refused the same way, with the same shape of message, and the message says to export a
+  start column only if the rows really are instantaneous events. A file with no end column is
+  unaffected, because it has no end to disagree with its start.
+- **Exit code 2 read as a crash.** `EXCLUDE` exits 2 and the first person to wire this into
+  continuous integration read that as the tool failing. The exit codes are now documented in
+  the top-level `--help`, in `check --help` and `pilot --help`, and in the README table: 0
+  for `PASS`, 2 for `EXCLUDE`, 3 for `INSUFFICIENT` and 1 for a real failure. No verdict
+  shares a code with an error, so 1 always means the command broke and never means a
+  detector was rejected. `check` now exits through one `fail()` helper for every input
+  problem, and a test pins the codes apart.
 - **A single-class fold reported a silent PASS on the pilot path.** `checks_from_scores()`
   sets AUC-ROC and PR-AUC to nan when the evaluated windows carry one class, because no
   rank metric is defined there. `check_row()` then evaluated `nan <= 0.5`, which is False,
@@ -115,6 +201,9 @@
   wired into this path.
 - Prevalence, and therefore the floor, depends on the bucket size and time range
   you choose. Two operators using different buckets cannot compare lift figures.
+  The alerted rate moves with the bucket for the same reason, so the alerted-rate
+  guard is read on the bucket you picked. A lift near 1.0 now says so next to the
+  verdict, which is the case where that choice decides the answer.
 - Postmortem windows start when impact was noticed rather than when the signal
   moved, so an early-firing detector is charged false positives.
 - The reported threshold is chosen in sample. Treat it as a description of this

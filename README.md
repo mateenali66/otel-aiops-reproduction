@@ -197,6 +197,7 @@ for fold 5. Every run writes its seed policy, package versions and hardware to
 | Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | `fdes/vus.py`, `tables/vus.csv`, pilot report |
 | Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
 | Flag-everything guard: F1 within 5 percent of the floor, above or below it, with recall at or above 0.95 | 8b | `fdes/checks.py::flag_everything`, `sec8b_flag_everything` |
+| Flag-everything guard on the alerted rate: alerting on at least half the wall-clock time and at least four times as often as anything is anomalous | 8b | `fdes/checks.py::alert_rate_saturated`, `alert_rate_far_above_prevalence`, `make check` only |
 | Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
 | Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | artifact `training.py`, and `fdes/protocol.py` for pilots |
 | Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
@@ -208,6 +209,15 @@ The 5 percent margin in the section 8b check is this package's choice of "the ev
 stated margin". It is two sided, so F1 has to sit near the floor from either direction, and
 a detector well above the floor is not in the flag-everything regime however high its
 recall gets. Change `FLOOR_MARGIN` in `fdes/checks.py` to use your own margin.
+
+Section 8b is read a second time on the alerted rate, because the F1 form compares one
+number against another number computed from the same prevalence and a detector can sit a
+rounding-level distance outside the margin. See "The alerted rate against prevalence"
+below for the rule, the thresholds and the case that motivated it. That reading is applied
+by `make check` and not by `make pilot`, because the archived per-fold table has no column
+for it and `tables/fdes_checks.csv` is compared byte for byte against the recorded run.
+Applying it to the 120 archived folds changes no verdict there, so the two paths agree on
+the published data.
 
 `fdes/vus.py` is a port of the VUS reference implementation from TSB-AD
 (https://github.com/TheDatumOrg/TSB-AD, Apache-2.0), the implementation of Paparrizos et
@@ -246,8 +256,9 @@ The pilot path evaluates any detector under the FDES procedure on the archived t
    python bin/reproduce.py pilot --detector my_module:MyDetector --signal metrics --fold 1
    ```
 
-   Exit code 0 means PASS, 2 means EXCLUDE under section 8 and 3 means INSUFFICIENT. The
-   report (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its
+   Exit code 0 means PASS, 2 means EXCLUDE under section 8 and 3 means INSUFFICIENT. A
+   failure exits 1 and no verdict uses that code, so an exit of 2 is a rejected detector
+   and not a crash. The report (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its
    reference value. `pilot_result.json` has the numbers, the fold assignment and the
    per-check `check_status`. The raw test scores and labels are saved as `.npy` for the
    prevalence re-scoring step.
@@ -363,8 +374,14 @@ says fix your input. The pilot path uses the same three verdicts and the same ex
 | Verdict | Exit code | What it means | What to do |
 |---|---|---|---|
 | `PASS` | 0 | the detector cleared every check that could be evaluated | read the report for which checks those were |
+| | 1 | not a verdict. The command failed on a bad argument, an unreadable CSV or a missing file, and printed the reason to stderr | fix what the message names |
 | `EXCLUDE` | 2 | the input supported a verdict and the detector failed a check | the detector is not worth deploying as it stands |
 | `INSUFFICIENT` | 3 | the input could not support a verdict either way | fix the CSVs or the range, then run it again |
+
+A non-zero exit is not a crash here. Only 1 means the command failed, and no verdict uses
+it, so continuous integration can branch on the code without reading the output. `make
+verify` uses the same convention: 0 for a match and 1 for a mismatch. The same table is in
+`python bin/reproduce.py check --help` and `pilot --help`.
 
 A run is `INSUFFICIENT` when any of these hold.
 
@@ -383,6 +400,67 @@ flag-everything guard and the degenerate-output guard would all have read `pass`
 floor row would have read `F1 minus floor = +0.000`. Three pass marks and a plus sign on a
 run holding no information is the exact failure this specification exists to criticise. The
 reason the run could not be evaluated is printed at the top, next to the verdict.
+
+### The alerted rate against prevalence
+
+A detector that alerts on nearly all of the time is the failure this whole tool exists to
+catch, and the F1 form of section 8b lets some of them through. That form asks whether F1
+sits within 5 percent of the predict-all floor with recall at or above 0.95. Both numbers
+are computed from the same prevalence, so the margin is narrow and a detector can miss it
+by a rounding-level distance.
+
+One real Splunk and PagerDuty export did exactly that. Prevalence 0.043, recall 1.00,
+precision 0.045, alerted rate 0.945, F1 0.087 against a floor of 0.082. F1 sits 5.6 percent
+above the floor, which is outside a 5 percent margin by six tenths of a percentage point,
+so section 8b did not fire and the verdict was `PASS`. The detector had alerted on 94.5
+percent of the week. At a 15 minute bucket the same detector alerted 95.4 percent of the
+time and was correctly excluded, so the verdict turned on the bucket size.
+
+The alerted rate against prevalence separates the two cases cleanly. A detector that works
+alerts about as often as things are actually anomalous, so its alerted rate sits near
+prevalence. A detector that flags everything alerts far more often than anything is wrong.
+The guard fires when both of these hold.
+
+1. The alerted rate is at or above 0.5, so the detector spends the majority of the
+   wall-clock time in an alerting state and silence is the exception.
+2. The alerted rate is at or above four times prevalence.
+
+Both conditions are needed, and each one protects a case the other would get wrong.
+Without the first, a detector watching for rare incidents would be condemned for working:
+at a prevalence of 0.001, alerting on 1 percent of the time with perfect recall is
+excellent and is still ten times prevalence. Without the second, a detector would be
+condemned for the shape of its data: where most of the time really is anomalous, say a
+prevalence of 0.6, a perfect detector alerts 60 percent of the time and has to keep its
+`PASS`.
+
+The alerted rate divided by prevalence is recall divided by precision, so the multiple of
+four says that at full recall no more than one alert in four lands on an incident. A
+perfect detector has an alerted rate equal to prevalence, so it cannot be caught by this
+guard at any prevalence. That matters, because the one-sided version of section 8b this
+package used to ship excluded any detector with recall at or above 0.95 whatever its F1,
+which wrongly excluded a detector scoring F1 1.0 at recall 1.0. The two-sided margin fixed
+that and opened the hole above. Reading the alerted rate closes the hole without
+reopening the original defect.
+
+`ALERT_RATE_SATURATION` and `ALERT_RATE_MULTIPLE` in `fdes/checks.py` set the two
+thresholds. The guard applies in both modes, and in scores mode it applies at whatever
+operating point the threshold produces, so a score that ranks buckets well still cannot
+reach `PASS` while its operating point flags most of the timeline.
+
+### When the lift sits near the floor
+
+The lift is F1 divided by the predict-all floor, and a lift near 1.0 means the detector
+scores about what flagging every bucket would score. A verdict there turns on a
+rounding-level difference, and the bucket size is a parameter you picked. On the export
+above the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes. It never left the
+neighbourhood of 1.0, and the verdict still flipped between `PASS` and `EXCLUDE` across
+them.
+
+When the lift lands within 20 percent of 1.0 either way, the report says so next to the
+verdict, names the lift, and asks you to re-run with other `--bucket` values before
+trusting the answer. Two bucket sizes that disagree mean the detector is sitting on the
+floor, not that one of the runs is wrong. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the
+band, and `check_result.json` carries the same flag as `near_floor`.
 
 ### Overlapping alert windows
 
@@ -426,9 +504,23 @@ python bin/reproduce.py check \
   --bucket 5m --from 2026-03-01T00:00:00Z --to 2026-03-08T00:00:00Z
 ```
 
-An alerts CSV with a start but no end is read as point events, one bucket each. An alerts
-CSV with a header and no rows is read as "this detector never fired", which is a real
-result and gets a real verdict.
+An alerts CSV with a start but no end is read as point events, one bucket each. That is a
+large interpretive choice, so it is reported next to the verdict and not in the assumption
+list below the table. The notice names the columns the file did have, which is what a
+Splunk export needs: `_time`, `_indextime`, `earliest` and `latest` gives a recognised
+start in `_time` and no recognised end, so every row becomes an instant even though
+`latest` was right there. Name it with `--end-col latest` (or `--incident-end-col` for the
+incidents file) and the windows come back. On one real export that difference alone turned
+an `EXCLUDE` into a `PASS` at three bucket sizes.
+
+The schema is read off the header, not off the rows, so a file with a header and no rows is
+still described by the columns it declares. An alerts CSV with a header and no rows is read
+as "this detector never fired", which is a real result and gets a real verdict.
+
+A row that ends before it starts is refused, and so is a row that ends the same second it
+starts. Both cover no time and both are export problems rather than measurements. The
+message names the two columns and how many rows are affected. Point events are not caught
+by this, because a file with no end column has no end to disagree with its start.
 
 Timestamps can be ISO 8601 or epoch seconds. Both of these are fine, and so is mixing the
 two across files, just not inside one column.
@@ -464,7 +556,8 @@ used.
 | Precision, recall, F1 at the operating point | 6 | yes | yes |
 | Predict-all baseline F1 = 2p/(1+p), and F1 minus it | 2, 7 | yes | yes |
 | Lift over the predict-all baseline | 7 | yes | yes |
-| Flag-everything guard | 8b | yes | yes |
+| Flag-everything guard on F1 and recall | 8b | yes | yes |
+| Flag-everything guard on the alerted rate against prevalence | 8b | yes | yes |
 | Degenerate output guard (alerts on all, alerts on none, one near-constant score) | 8 | yes | yes |
 | AUC-ROC against its 0.5 reference | 6, 7, 8a | **no** | yes |
 | PR-AUC against its p reference | 6, 7 | **no** | yes |
@@ -543,6 +636,7 @@ Timeline 2026-03-01T00:00:00Z to 2026-03-08T00:00:00Z, 2016 buckets of 300 s.
 | Threshold-independent (PR) | 6, 7 | NOT COMPUTED | p | see below |
 | Range-based (VUS) | 6 | NOT COMPUTED | | see below |
 | Flag-everything guard | 8b | recall = 0.078, alerted rate = 0.104 | F1 within 5% of floor and recall >= 0.95 | pass |
+| Alerted rate against prevalence | 8b | alerted rate = 0.104, p = 0.0506 | alerted rate >= 0.5 and >= 4 x p | pass |
 | Degenerate output guard | 8 | alerted rate = 0.104, distinct scores = n/a | alerts on all, alerts on none, or one near-constant score | pass |
 
 ## Operating point

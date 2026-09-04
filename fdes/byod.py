@@ -42,8 +42,9 @@ import numpy as np
 import pandas as pd
 
 from . import SPEC_VERSION
-from .checks import (DEGENERATE_AUC, DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE,
-                     RANDOM_AUC_REFERENCE, RECALL_SATURATION, check_state, flag_everything,
+from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_SATURATION, DEGENERATE_AUC,
+                     DEGENERATE_F1_RATIO, FLOOR_MARGIN, NOT_EVALUABLE, RANDOM_AUC_REFERENCE,
+                     RECALL_SATURATION, alert_rate_saturated, check_state, flag_everything,
                      predict_all_f1)
 
 # Header names seen in real exports. Matching is case insensitive and ignores surrounding
@@ -67,6 +68,11 @@ MAX_BUCKETS = 5_000_000
 # Overlap at or above this share of the window time gets its own line near the top of the
 # report, because at that point the input row count no longer describes the alert time.
 OVERLAP_NOTICE = 0.10
+# A lift this close to 1.0 either way gets its own line near the top of the report. The
+# verdict there turns on a rounding-level difference and it moves with the bucket size.
+NEAR_FLOOR_BAND = 0.20
+# Bucket sizes to suggest re-running with when the lift lands in that band.
+SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
 _TZ_SUFFIX = re.compile(r"(?:Z|z|[+-]\d{2}:?\d{2})$")
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
@@ -174,14 +180,18 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
                  label: str) -> tuple[np.ndarray, np.ndarray, dict]:
     """Read a CSV of windows. Returns start seconds, end seconds and a note.
 
-    A file with a start but no end is read as point events, one bucket each.
+    A file with a start but no end is read as point events, one bucket each. That is a
+    large interpretive choice, so the schema is read off the header rather than off the
+    rows. A file with a header and no rows still has whatever columns its header names,
+    and reporting "no end column" on one of those describes the file wrongly.
     """
     path = Path(path)
     df = read_csv(path)
+    columns = [str(c) for c in df.columns]
     s_name = pick_column(df, START_COLS + TIME_COLS, start_col, f"{label} start", path)
     e_name = pick_column(df, END_COLS, end_col, f"{label} end", path, required=False)
     starts, s_note = parse_timestamps(df[s_name], f"{path} column '{s_name}'")
-    if e_name is None or len(df) == 0:
+    if e_name is None:
         ends = starts.copy()
         e_note = {"format": "none", "timezone": "n/a", "naive_rows": 0, "total_rows": 0}
         point_events = True
@@ -196,6 +206,19 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
         raise InputError(f"{path}: {backwards} row(s) end before they start. "
                          f"Check the '{s_name}' and '{e_name}' columns.")
 
+    # A window that ends the same second it starts covers no time. It is the same class of
+    # export problem as one that ends before it starts, so it gets the same answer instead
+    # of being marked onto one bucket in silence. Point events are not affected, because
+    # they have no end column to disagree with.
+    if not point_events:
+        empty = int((ends == starts).sum())
+        if empty:
+            raise InputError(
+                f"{path}: {empty} row(s) end at the same second they start, so they cover "
+                f"no time. Check the '{s_name}' and '{e_name}' columns. If these really are "
+                f"instantaneous events, export them with a start column only and every row "
+                f"is read as a point event covering one bucket.")
+
     sev_name = pick_column(df, SEVERITY_COLS, None, "severity", path, required=False)
     severities = {}
     if sev_name is not None:
@@ -205,6 +228,7 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
     note = {
         "file": str(path),
         "rows": int(len(df)),
+        "columns": columns,
         "start_column": s_name,
         "end_column": e_name,
         "point_events": point_events,
@@ -634,6 +658,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     sec8a = bool(computed.get("auc_roc") is not None
                  and computed["auc_roc"] <= RANDOM_AUC_REFERENCE)
     sec8b = flag_everything(pm["f1_score"], pm["recall"], floor)
+    alert_rate = deg["alerted_rate"]
+    saturated = bool(both_classes and alert_rate_saturated(alert_rate, prevalence))
     no_lift = bool(both_classes and pm["f1_score"] <= floor)
     table12 = bool(computed.get("auc_roc") is not None
                    and computed["auc_roc"] <= DEGENERATE_AUC
@@ -657,6 +683,13 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                            f"{int(FLOOR_MARGIN * 100)} percent of the predict-all floor "
                            f"{round(floor, 4)} while recall {pm['recall']} is at or above "
                            f"{RECALL_SATURATION}, which is the flag-everything regime")
+        if saturated and not deg["alerts_on_everything"]:
+            reasons.append(
+                f"The detector alerted on {alert_rate * 100:.1f} percent of the buckets in "
+                f"the range while only {prevalence * 100:.1f} percent of them fall inside an "
+                f"incident window. That is {alert_rate / prevalence:.0f} times as often as "
+                f"anything was wrong, on the majority of the wall-clock time, which is the "
+                f"flag-everything regime measured by alerted time rather than by F1")
         if no_lift and not sec8b:
             reasons.append(f"F1 {pm['f1_score']} is at or below the predict-all floor "
                            f"{round(floor, 4)}, so flagging every bucket would have scored "
@@ -665,6 +698,7 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["checks"] = {
         "sec8a_auc_at_or_below_random": sec8a,
         "sec8b_flag_everything": sec8b,
+        "alert_rate_far_above_prevalence": saturated,
         "no_lift_over_predict_all": no_lift,
         "degenerate_table12_rule": table12,
         "degenerate_output": deg["degenerate"],
@@ -676,9 +710,16 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         "sec8a_auc_at_or_below_random": check_state(
             sec8a, evaluable and computed.get("auc_roc") is not None),
         "sec8b_flag_everything": check_state(sec8b, evaluable),
+        "alert_rate_far_above_prevalence": check_state(saturated, evaluable),
         "degenerate_output": check_state(deg["degenerate"], evaluable),
     }
     computed["exclusion_reasons"] = reasons
+    # A lift this close to 1.0 is a verdict that turns on a rounding-level difference, and
+    # the bucket size is a parameter the user picked. Say so with the verdict.
+    lift = computed["f1_over_floor"]
+    computed["near_floor"] = bool(evaluable and lift is not None
+                                  and abs(lift - 1.0) <= NEAR_FLOOR_BAND)
+    computed["near_floor_band"] = NEAR_FLOOR_BAND
     if blockers:
         computed["verdict"] = "INSUFFICIENT"
     else:
@@ -910,6 +951,33 @@ def merge_sentence(name: str, cov: dict) -> str:
             f"another window and {'was' if absorbed == 1 else 'were'} absorbed.")
 
 
+def point_event_notice(name: str, note: dict, bucket_s: int) -> str:
+    """The line that says every row of a window file was read as an instant."""
+    flag = "--incident-end-col" if name == "incidents" else "--end-col"
+    seen = ", ".join(f"`{c}`" for c in note.get("columns") or [note["start_column"]])
+    rows = _plural(note["rows"], "row")
+    return (f"Point events assumed. `{name}` ({note['file']}) has the start column "
+            f"`{note['start_column']}` and no column this tool recognises as an end, so all "
+            f"{rows} were read as point events covering one {bucket_s} s bucket each. That "
+            f"is an interpretation of your export and it can decide the verdict on its own, "
+            f"because a window read as an instant covers far less time than it really did. "
+            f"The columns in that file are {seen}. If one of them is the end of the window, "
+            f"name it with {flag} and run this again.")
+
+
+def near_floor_notice(res: dict, grid: dict) -> str:
+    """The line that says this verdict is not stable against the bucket size."""
+    others = [b for b in SUGGESTED_BUCKETS
+              if parse_duration(b) != grid["bucket_seconds"]]
+    return (f"Near the floor. F1 / floor is {_fmt(res['f1_over_floor'], 2)}, within "
+            f"{int(NEAR_FLOOR_BAND * 100)} percent of 1.0, so this detector scores about "
+            f"what flagging every bucket would score. A result that close to the floor is "
+            f"not stable. The bucket size is a parameter you chose, and on the same data a "
+            f"different bucket can move the verdict between PASS and EXCLUDE without the "
+            f"numbers moving much at all. Run this again with a few other --bucket values, "
+            f"for example {', '.join(others)}, and trust the verdict only if they agree.")
+
+
 def render_report(r: dict) -> str:
     res = r["results"]
     grid = r["bucketing"]
@@ -937,6 +1005,16 @@ def render_report(r: dict) -> str:
         for i, reason in enumerate(res["not_evaluable_reasons"], 1):
             lines.append(f"{i}. {reason}")
         lines.append("")
+
+    # Reading every row as a point event is an interpretation of the input, not a
+    # measurement of it, and it can decide the verdict on its own. It belongs next to the
+    # verdict rather than in the assumption list further down.
+    for name, note in r["inputs"].items():
+        if note.get("point_events") and note.get("end_column") is None:
+            lines += [point_event_notice(name, note, grid["bucket_seconds"]), ""]
+
+    if res.get("near_floor"):
+        lines += [near_floor_notice(res, grid), ""]
 
     for name, cov in r["coverage"].items():
         if cov.get("overlap_fraction", 0) >= OVERLAP_NOTICE:
@@ -992,6 +1070,10 @@ def render_report(r: dict) -> str:
         f"{_fmt(deg['alerted_rate'])} | F1 within {int(FLOOR_MARGIN * 100)}% of floor and "
         f"recall >= {RECALL_SATURATION} | "
         f"{status.get('sec8b_flag_everything', 'pass')} |",
+        f"| Alerted rate against prevalence | 8b | alerted rate = "
+        f"{_fmt(deg['alerted_rate'])}, p = {_fmt(p, 4)} | alerted rate >= "
+        f"{ALERT_RATE_SATURATION} and >= {int(ALERT_RATE_MULTIPLE)} x p | "
+        f"{status.get('alert_rate_far_above_prevalence', 'pass')} |",
         f"| Degenerate output guard | 8 | alerted rate = {_fmt(deg['alerted_rate'])}, "
         f"distinct scores = {deg['distinct_scores'] if deg['distinct_scores'] is not None else 'n/a'} | "
         f"alerts on all, alerts on none, or one near-constant score | "

@@ -10,6 +10,8 @@ Each function maps to a numbered section of SPEC.md:
   section 8b  exclude when an operating-point score sits within the stated margin of the
               predict-all floor with recall near saturation (flag-everything regime).
               The margin is two sided: F1 must be near the floor, above or below it.
+              The same section is also read on the alerted rate, because a detector can
+              flag nearly everything and still land a fraction outside that margin.
 
 The "degenerate" column reproduces the rule used for Table 12 / metric_reconciliation.csv
 in the IEEE Access article: AUC-ROC <= 0.55 and F1 >= 0.95 x predict-all F1.
@@ -29,6 +31,8 @@ from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 RANDOM_AUC_REFERENCE = 0.5      # section 7, ROC family
 FLOOR_MARGIN = 0.05             # section 8b, "stated margin" used by this package (5 percent)
 RECALL_SATURATION = 0.95        # section 8b, "recall near saturation"
+ALERT_RATE_SATURATION = 0.5     # section 8b read on the alerted rate, see alert_rate_saturated
+ALERT_RATE_MULTIPLE = 4.0       # ... and how far above prevalence that rate has to sit
 DEGENERATE_AUC = 0.55           # article rule (Table 12)
 DEGENERATE_F1_RATIO = 0.95      # article rule (Table 12)
 
@@ -73,6 +77,39 @@ def flag_everything(f1: float, recall: float, floor: float) -> bool:
     """
     return bool((1.0 - FLOOR_MARGIN) * floor <= f1 <= (1.0 + FLOOR_MARGIN) * floor
                 and recall >= RECALL_SATURATION)
+
+
+def alert_rate_saturated(alerted_rate: float, prevalence: float) -> bool:
+    """Section 8b read on the alerted rate: is this detector flagging nearly everything?
+
+    The F1 form of section 8b above compares one number against another number computed
+    from the same prevalence, so a detector can sit a rounding-level distance outside the
+    margin and escape it. A detector that alerted on 94.5 percent of the timeline at a
+    prevalence of 0.043 scores F1 0.087 against a floor of 0.082, which is 5.6 percent
+    above the floor and so lands just outside a 5 percent margin. Nothing else excluded it.
+
+    The alerted rate against prevalence separates the two cases the F1 form confuses.
+    A detector that works alerts about as often as things are actually anomalous, so its
+    alerted rate sits near prevalence. A detector that flags everything alerts far more
+    often than anything is wrong. Both conditions below have to hold.
+
+      1. The alerted rate is at or above ALERT_RATE_SATURATION, so the detector spends the
+         majority of the wall-clock time in an alerting state and silence is the exception.
+         Without this condition a rare-incident detector would be caught: at a prevalence of
+         0.001, alerting on 1 percent of the time with perfect recall is excellent work and
+         is still ten times prevalence.
+      2. The alerted rate is at or above ALERT_RATE_MULTIPLE times prevalence. Since
+         alerted rate over prevalence equals recall over precision, the multiple of 4 means
+         that at full recall no more than one alert in four lands on an incident. Without
+         this condition a detector would be caught for working on data where most of the
+         time really is anomalous: at a prevalence of 0.6 a perfect detector alerts 60
+         percent of the time, and it has to keep its PASS.
+
+    A perfect detector has an alerted rate equal to prevalence, so condition 2 fails for it
+    at any prevalence and any multiple above 1. It cannot be caught here.
+    """
+    return bool(alerted_rate >= ALERT_RATE_SATURATION
+                and alerted_rate >= ALERT_RATE_MULTIPLE * prevalence)
 
 
 def check_row(prevalence: float, f1: float, recall: float, auc_roc: float,
