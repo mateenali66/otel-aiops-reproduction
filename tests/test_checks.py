@@ -22,7 +22,8 @@ import sys  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from fdes import protocol  # noqa: E402
-from fdes.checks import (CSV_FIELDS, NOT_EVALUABLE, check_row,  # noqa: E402
+from fdes.checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_SATURATION,  # noqa: E402
+                         CSV_FIELDS, NOT_EVALUABLE, alert_rate_saturated, check_row,
                          checks_from_scores)
 
 # The archived IsolationForest logs fold 1 row, the one `make pilot` reproduces.
@@ -195,6 +196,39 @@ class TestPilotReport(unittest.TestCase):
         self.assertIn("| pass |", report)
         self.assertIn("AUC-ROC = 1.000", report)
         self.assertNotIn(NOT_EVALUABLE, report)
+
+
+class TestAlertRateGuard(unittest.TestCase):
+    """Section 8b read on the alerted rate rather than on F1.
+
+    The F1 form compares one number against another computed from the same prevalence, so
+    a detector can sit a rounding-level distance outside the margin and escape it. The
+    alerted rate against prevalence separates flagging everything from working well.
+    """
+
+    def test_a_detector_flagging_nearly_everything_fires_it(self):
+        # The real export: 94.5 percent of the timeline alerted at a prevalence of 0.043.
+        self.assertTrue(alert_rate_saturated(0.9451, 0.0431))
+
+    def test_a_perfect_detector_never_fires_it_at_any_prevalence(self):
+        # A perfect detector alerts exactly as often as things are anomalous.
+        for p in (0.001, 0.043, 0.25, 0.5, 0.6, 0.9, 1.0):
+            self.assertFalse(alert_rate_saturated(p, p), p)
+
+    def test_a_rare_incident_detector_that_alerts_rarely_never_fires_it(self):
+        # Ten times prevalence, but only 1 percent of the wall-clock time, so it is well
+        # short of the saturation bar and keeps its verdict.
+        self.assertFalse(alert_rate_saturated(0.01, 0.001))
+
+    def test_both_conditions_have_to_hold(self):
+        p = 0.05
+        just_under_the_rate = ALERT_RATE_SATURATION - 0.01
+        self.assertFalse(alert_rate_saturated(just_under_the_rate, p))
+        self.assertTrue(alert_rate_saturated(ALERT_RATE_SATURATION, p))
+        # High rate, but prevalence is high with it, so the detector is not flagging
+        # more than the data warrants.
+        self.assertFalse(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE + 0.01))
+        self.assertTrue(alert_rate_saturated(0.8, 0.8 / ALERT_RATE_MULTIPLE))
 
 
 class TestRecordedRun(unittest.TestCase):

@@ -13,8 +13,15 @@ Subcommands
   check           run the FDES checks against your own alert or score CSVs; no Zenodo
                   artifact and no detector plugin needed
 
-Both pilot and check exit 0 on PASS, 2 on EXCLUDE and 3 on INSUFFICIENT (the input could
-not support a verdict either way).
+Exit codes
+  0  the command finished and, for pilot and check, the verdict is PASS
+  1  the command failed: a bad argument, an unreadable CSV, a missing file, a checksum
+     mismatch, or a verify run that did not match expected/. No verdict uses this code, so
+     an exit of 1 always means something went wrong rather than a detector being rejected
+  2  pilot and check only: the verdict is EXCLUDE. The input supported a verdict and the
+     detector failed a check. The run itself worked, so this is not an error
+  3  pilot and check only: the verdict is INSUFFICIENT. The input could not support a
+     verdict either way, so fix the CSVs or the range and run it again
 
 Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
 sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
@@ -473,6 +480,21 @@ def cmd_verify_archive(args) -> None:
 # support a verdict either way, which is a problem with the input and not with the detector.
 # Both the pilot path and the check path use them.
 VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3}
+# A real failure exits 1 and nothing else does, so 2 is never a crash. Continuous
+# integration reads 2 as "this detector was rejected" and 1 as "this command broke".
+EXIT_ERROR = 1
+
+EXIT_CODE_HELP = """exit codes
+  0  PASS, the detector cleared every check that could be evaluated
+  1  the command failed (bad argument, unreadable CSV, missing file). Not a verdict
+  2  EXCLUDE, the input supported a verdict and the detector failed a check. Not an error
+  3  INSUFFICIENT, the input could not support a verdict either way"""
+
+
+def fail(message: str) -> None:
+    """Stop with the error exit code, which no verdict shares."""
+    print(message, file=sys.stderr, flush=True)
+    sys.exit(EXIT_ERROR)
 
 
 # --------------------------------------------------------------------------- pilot
@@ -498,7 +520,7 @@ def cmd_check(args) -> None:
     from fdes import byod
 
     if bool(args.alerts) == bool(args.scores):
-        sys.exit("pass exactly one of --alerts (alert windows) or --scores (a score series)")
+        fail("pass exactly one of --alerts (alert windows) or --scores (a score series)")
 
     try:
         if args.alerts:
@@ -520,7 +542,7 @@ def cmd_check(args) -> None:
                 incident_end_col=args.incident_end_col)
             label = args.label or Path(args.scores).stem
     except byod.InputError as exc:
-        sys.exit(f"input problem: {exc}")
+        fail(f"input problem: {exc}")
 
     out = byod.write_outputs(result, Path(args.out) / label)
     log((out / "check_report.md").read_text())
@@ -554,7 +576,8 @@ def main() -> None:
     s = sub.add_parser("verify"); s.add_argument("--out", default=str(OUT_DIR / "smoke")); s.set_defaults(fn=cmd_verify)
     s = sub.add_parser("verify-archive"); s.set_defaults(fn=cmd_verify_archive)
 
-    s = sub.add_parser("pilot")
+    s = sub.add_parser("pilot", epilog=EXIT_CODE_HELP,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("--detector", required=True, help="module.path:ClassName subclassing detectors.base.Detector")
     s.add_argument("--signal", default="logs", choices=ALL_SIGNALS)
     s.add_argument("--fold", type=int, default=1, choices=[1, 2, 3, 4, 5])
@@ -562,7 +585,9 @@ def main() -> None:
     s.add_argument("--out", default=str(OUT_DIR / "pilot"))
     s.set_defaults(fn=cmd_pilot)
 
-    s = sub.add_parser("check", help="FDES checks on your own alert or score CSVs")
+    s = sub.add_parser("check", help="FDES checks on your own alert or score CSVs",
+                       epilog=EXIT_CODE_HELP,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("--alerts", default=None,
                    help="CSV of alert windows (start and end columns). Alerts mode.")
     s.add_argument("--scores", default=None,
