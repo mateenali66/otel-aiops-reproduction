@@ -77,6 +77,10 @@ OVERLAP_NOTICE = 0.10
 NEAR_FLOOR_BAND = 0.20
 NEAR_BAR_BAND = 0.10    # an exclusion this close to the bar says so, see the reason text
 ZERO_LENGTH_DUTY_LIMIT = 0.20   # above this share of point events, duty cycle means nothing
+# Two gates on the quantisation suppression, and they close each other's holes. See
+# run_check for why neither is enough alone.
+SUPPRESSION_MAX_LEVERAGE = 50.0        # how much of the rate the bucket may be blamed for
+SUPPRESSION_MAX_ALERTS_PER_HOUR = 1.0  # "occasional" has to mean something
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
@@ -597,6 +601,21 @@ def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dic
     return out
 
 
+def alerts_per_hour(grid: dict, starts: np.ndarray, ends: np.ndarray) -> float | None:
+    """How often this detector raises an alert, per hour of the evaluation range.
+
+    Counted on windows that touch the range, so an export whose rows mostly sit outside it
+    is not charged for them. This is the only quantity that separates a detector alerting
+    briefly and occasionally from one paging constantly in short bursts, because the two are
+    indistinguishable by duty cycle and the second can have the lower one.
+    """
+    _, touches = clip_to_range(grid, starts, ends)
+    hours = float(grid["span_seconds"]) / 3600.0
+    if hours <= 0:
+        return None
+    return float(int(touches.sum())) / hours
+
+
 def dominant_alert_notice(res: dict) -> str:
     a = res["alert_concentration"]
     return (f"One alert window owns most of the alerted time. The longest of the "
@@ -805,6 +824,7 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     # strength of a disagreement with itself.
     a_duty = duty_cycle(grid, a_start, a_end)
     i_duty = duty_cycle(grid, i_start, i_end)
+    a_per_hour = alerts_per_hour(grid, a_start, a_end)
     wanted = sorted({parse_duration(b) for b in SWEEP_BUCKETS} | {grid["bucket_seconds"]})
     rows, skipped = [], []
     for w in wanted:
@@ -818,7 +838,8 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
         computed, _ = run_check(mode="alerts", y=truth, pred=alerted, scores=None,
                                 truth_rows=i_note["rows"], truth_coverage=i_cov,
                                 alert_rows=a_note["rows"], alert_coverage=a_cov,
-                                alert_duty=a_duty, truth_duty=i_duty)
+                                alert_duty=a_duty, truth_duty=i_duty,
+                                alerts_per_hour=a_per_hour)
         rows.append({
             "bucket": fmt_bucket(w),
             "bucket_seconds": w,
@@ -1028,7 +1049,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
               alert_rows: int | None = None,
               alert_coverage: dict | None = None,
               alert_duty: float | None = None,
-              truth_duty: float | None = None) -> tuple[dict, list[dict]]:
+              truth_duty: float | None = None,
+              alerts_per_hour: float | None = None) -> tuple[dict, list[dict]]:
     """Apply the FDES checks to one bucketed timeline.
 
     Returns the computed values and the list of things that were not computable, each with
@@ -1157,10 +1179,35 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # The test is the guard's own rule applied to the raw durations, which no bucket has
     # touched. If it does not fire there, the exclusion belongs to the bucket size the user
     # picked rather than to the detector, and this procedure will not exclude on that.
+    # Two gates on top of that, because the duty cycle alone cannot separate the case this
+    # protects from the case that abuses it. A detector emitting 5,184 one-second windows
+    # pages 173 times a day and has a duty cycle of 0.002, which is LOWER than the legitimate
+    # on-call detector's 0.0125. Ranked by duty cycle the abuser looks better behaved. An
+    # earlier gate counted rows where end equals start, which a one-second window walks
+    # straight past, and most real exports emit an end time.
+    #
+    # Leverage is how much of the alerted rate the suppression is being asked to blame on the
+    # bucket. The legitimate case runs about 20. The abuser runs 300, which is asking the
+    # tool to accept that the bucket invented 99.7 percent of the signal.
+    #
+    # The rate per hour is the gate that finally separates them, and it is the one a reviewer
+    # asked for twice before I took it. The objection to it was that "too many pages" is an
+    # on-call judgement this tool refuses to make. That objection is answerable. This is not
+    # a claim about how many pages anyone can stand. The suppression's own argument is that
+    # the detector alerts briefly AND occasionally, and more than one alert an hour on
+    # average is not occasional, whatever your tolerance.
+    #
+    # Neither gate alone holds. Tune the windows to keep leverage under the cap and the rate
+    # per hour goes over. Thin the alerts to get under the rate per hour and the leverage
+    # goes over.
+    leverage = (alert_rate / alert_duty) if alert_duty else None
     quantised = bool(saturated
                      and alert_duty is not None and truth_duty is not None
                      and truth_duty > 0.0
-                     and not alert_rate_saturated(alert_duty, truth_duty))
+                     and not alert_rate_saturated(alert_duty, truth_duty)
+                     and leverage is not None and leverage <= SUPPRESSION_MAX_LEVERAGE
+                     and alerts_per_hour is not None
+                     and alerts_per_hour <= SUPPRESSION_MAX_ALERTS_PER_HOUR)
     if quantised:
         saturated = False
     # The bar the detector had to stay under, so the report can print it rather than only
@@ -1250,7 +1297,11 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         "sec8a_auc_at_or_below_random": check_state(
             sec8a, evaluable and computed.get("auc_roc") is not None),
         "sec8b_flag_everything": check_state(sec8b, evaluable),
-        "alert_rate_far_above_prevalence": check_state(saturated, evaluable),
+        # "pass" would be a lie when the guard reached the rate and was told to stand down
+        # because the rate is a bucketing artefact. The prose says "was not applied" and a
+        # reader who skims the table has to be told the same thing.
+        "alert_rate_far_above_prevalence": ("not applied, see the notice above" if quantised
+                                            else check_state(saturated, evaluable)),
         "degenerate_output": check_state(deg["degenerate"], evaluable),
     }
     computed["exclusion_reasons"] = reasons
@@ -1283,6 +1334,10 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alert_duty_cycle"] = round(alert_duty, 6) if alert_duty is not None else None
     computed["incident_duty_cycle"] = round(truth_duty, 6) if truth_duty is not None else None
     computed["alert_rate_quantised"] = quantised
+    computed["alert_rate_leverage"] = round(leverage, 2) if leverage is not None else None
+    computed["alerts_per_hour"] = round(alerts_per_hour, 4) if alerts_per_hour is not None else None
+    computed["suppression_max_leverage"] = SUPPRESSION_MAX_LEVERAGE
+    computed["suppression_max_alerts_per_hour"] = SUPPRESSION_MAX_ALERTS_PER_HOUR
     computed["alert_windows"] = alert_rows
     # Kept for anything reading the v1.2.0 field. There is one rule now, so it is either
     # the curve or nothing.
@@ -1340,7 +1395,8 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
                                       truth_rows=i_note["rows"], truth_coverage=i_span,
                                       alert_rows=a_note["rows"], alert_coverage=a_span,
                                       alert_duty=duty_cycle(grid, a_start, a_end),
-                                      truth_duty=duty_cycle(grid, i_start, i_end))
+                                      truth_duty=duty_cycle(grid, i_start, i_end),
+                                      alerts_per_hour=alerts_per_hour(grid, a_start, a_end))
     computed["alert_concentration"] = alert_concentration(grid, a_start, a_end)
     computed["incident_concentration"] = incident_concentration(grid, i_start, i_end)
     computed["incident_concentration"]["prevalence_without_long_rows"] = prevalence_without_rows(

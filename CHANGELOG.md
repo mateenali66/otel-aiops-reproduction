@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.3.4] - 2026-09-04
+
+### Fixed
+
+- **The quantisation suppression is gated on alert volume, which is what a reviewer asked
+  for twice and I refused twice.** The 1.3.3 gate counted rows where the end equals the
+  start, so it caught point events and nothing else. A one-second window walks straight past
+  it, and most real exports emit an end time. The v1.3.2 escape came back intact: 5,184
+  one-second windows, 173 pages a day, precision 0.014, all four buckets agreeing so there
+  was no unstable verdict to catch it, coming back PASS at exit 0 with no check firing at
+  all.
+
+  The reviewer's proof is the part that settles it. **The abuser has a lower duty cycle than
+  the legitimate detector**, 0.0020 against 0.0125. Ranked by time occupied, the detector
+  paging 173 times a day looks better behaved than the one paging 6 times a day. So no gate
+  built on duty cycle or window length can separate them, because both rank them the wrong
+  way round. Alert count is the only quantity that does, and it separates them by 28 times.
+
+  My objection to a count gate was that "too many pages" is an on-call judgement this tool
+  refuses to make. That objection was wrong, and the answer is in the suppression's own
+  argument. It claims the detector alerts briefly AND occasionally. More than one alert an
+  hour on average is not occasional, whatever anyone's tolerance is. That is a definition,
+  not a preference.
+
+  Two gates now, and neither holds alone. `SUPPRESSION_MAX_LEVERAGE` (50) caps how much of
+  the alerted rate the suppression may blame on the bucket: the legitimate case runs 20, the
+  abuser 300, which is asking the tool to accept that the bucket invented 99.7 percent of the
+  signal. `SUPPRESSION_MAX_ALERTS_PER_HOUR` (1.0) is the count gate. Tune the windows to sit
+  under the leverage cap and the rate per hour goes over. Thin the alerts to get under the
+  rate per hour and the leverage goes over. Both are tested at their crossing point.
+
+- **The check table said `pass` for a guard that had stood down.** The prose said "was not
+  applied" and the table one line below said "pass" for the same check, with the ratio and
+  the bar sitting in the same row. A skimmer reads the table. It now says "not applied, see
+  the notice above".
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 209 tests pass.
+
+### Not taken
+
+A third option was offered: leave the verdict and return exit 2 whenever the suppression
+fires, so a continuous integration job never reads a suppressed run as clean. With the
+suppression now gated on both leverage and alert volume, a suppressed run is genuinely quiet,
+and failing it in CI would be a false failure on a working detector. The exit code follows
+the verdict.
+
 ## [1.3.3] - 2026-09-04
 
 Two reviewers reported against 1.3.2 on the same day, one from a real Azure Monitor and
