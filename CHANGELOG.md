@@ -1,5 +1,82 @@
 # Changelog
 
+## [1.3.8] - 2026-09-04
+
+A fourth production stack, this one on Cloudflare with an unusual shape: a prevalence of
+0.853 and an alert export where every notification appeared four times. It found two places
+where the report states something false with confidence, and the verdict was right in both.
+
+### Fixed
+
+- **The flag-everything guard was reported as passed on runs where it cannot fire.** The bar
+  is the square root of twice prevalence, so above a prevalence of 0.5 it exceeds 1.0 and no
+  alerted rate can reach it. At a prevalence of 0.853 the table printed a bar of 1.306 next
+  to the word "pass", for a check that was structurally incapable of failing, while a
+  detector alerting on 61.5 percent of the timeline sailed through it. The docstring proved
+  the safe direction, that a perfect detector can never be caught, and nobody wrote down the
+  dual. It now reads "not reachable at this prevalence", and `alert_rate_bar_unreachable`
+  records it.
+
+- **The sweep asserted a mechanism that was not the one operating.** The prose said
+  unconditionally that a coarse bucket lets one short alert cover a whole bucket of incident
+  time, raising recall while precision is barely charged, and that this moves the verdict on
+  its own. On the Cloudflare run the lift cleared the floor at every one of the four buckets
+  and every flip came from the alerted rate crossing the bar. The verdict was right and the
+  stated cause was wrong, and the table carried no column that would have shown it.
+
+  The sweep table now has a Guard bar column and a Decided by column naming the check that
+  produced each row, and the prose describes both mechanisms and points at the column
+  instead of asserting one. The near-floor notice also claimed the disagreement across
+  buckets "is why the verdict is UNSTABLE", which reads as a claim about the floor. It now
+  states the fact and points at the same column.
+
+- **Prevalence moves across the ladder and nothing said so.** The sweep warned that a coarse
+  bucket flatters recall. It never said that a coarse bucket also raises prevalence, by a
+  factor of 3.8 on the real export, and that both the predict-all floor and the guard bar are
+  computed from prevalence. So the reference the verdict is measured against was moving down
+  the table alongside the detector's own numbers. Named when it moves by
+  `PREVALENCE_DRIFT_NOTICE` (2.0) or more.
+
+- **A prevalence above a half is now a headline.** It says most of the observation window was
+  inside an incident, which is occasionally true and much more often means the incident file
+  is describing ticket lifetime rather than incident time. Every number below it is measured
+  against a floor computed from it. The notice also says that it silently disables the
+  flag-everything guard, which is the practical consequence a reader would otherwise have to
+  derive from a bar above 1.
+
+### Added
+
+- **Duplicate alert rows are detected and named.** The real export delivered every
+  notification to four email recipients, so each alert appeared four times with a distinct
+  row identifier and an identical timestamp. That multiplied the alerted rate and the alerts
+  per incident by four, and it made the overlap notice describe a distribution list as if it
+  were a temporal property of the detector. On a policy with more recipients it would cross
+  the alerts-per-incident limit on distribution-list size alone. The tool cannot tell a
+  fan-out from a detector that genuinely fired twice, so it still counts every row, but it
+  now says what it found and what it multiplies. An even multiplicity across every distinct
+  row is named as the signature of a fan-out.
+
+- **The exit code is written into `check_result.json`.** It was reachable only by running the
+  command, so anything reading the file afterwards had to re-derive it from the verdict plus
+  two flags, and would have got it wrong on a suppressed UNSTABLE.
+
+- **`--help` documents exit 5.** It listed 0 to 4, so a continuous integration job written
+  from it mishandled the one code added in 1.3.5.
+
+- **The alerted rate is a top-level field.** It was reachable only inside
+  `degenerate_output`, while the ratio and the bar computed from it sat at the top level.
+
+- **The alerts-per-incident notice prints its own denominator** and says it is counted on raw
+  incident times rather than buckets, so it will not always match the stretch count in the
+  coverage section. Those two numbers differed on the real export and could not be reconciled
+  from the report.
+
+### Unchanged
+
+No archived result moved. `make verify` and `make verify-archive` both return PASS, and
+`fdes_checks.csv`, `table4_single_signal.csv`, `vus.csv` and `pilot_report.md` are byte
+identical to the reference run. 226 tests pass.
+
 ## [1.3.7] - 2026-09-04
 
 ### Fixed

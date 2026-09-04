@@ -514,7 +514,15 @@ EXIT_CODE_HELP = """exit codes
   2  EXCLUDE, the input supported a verdict and the detector failed a check. Not an error
   3  INSUFFICIENT, the input could not support a verdict either way
   4  UNSTABLE, the verdict changed across bucket sizes so no one verdict is the result
-     (check, alerts mode)"""
+     (check, alerts mode)
+  5  PASS, but something was held back. Either an exclusion was suppressed because the
+     alerted rate was an artefact of the bucket size, or the detector alerted far more
+     often than there were incidents to find. pass_qualified in check_result.json says
+     the same thing and the report says which caveat applies. Whether 5 should fail a
+     build is your decision: a detector that alerts briefly and occasionally can
+     legitimately exit 5, so treating it as a hard failure will reject working
+     detectors, and treating it as 0 will let through one that pages more often than
+     anyone would read (check, alerts mode)"""
 
 
 def fail(message: str) -> None:
@@ -580,11 +588,17 @@ def cmd_check(args) -> None:
     # non-zero exit into a zero one, or a continuous integration job reading only the exit
     # code passes on a run whose verdict is not stable across bucket sizes and never sees
     # the text saying so. A suppressed UNSTABLE exits as UNSTABLE.
+    code = VERDICT_EXIT_CODES[result["verdict"]]
     if result.get("results", {}).get("sweep_suppressed_unstable"):
-        sys.exit(VERDICT_EXIT_CODES["UNSTABLE"])
-    if result["verdict"] == "PASS" and result.get("pass_qualified"):
-        sys.exit(QUALIFIED_PASS_EXIT)
-    sys.exit(VERDICT_EXIT_CODES[result["verdict"]])
+        code = VERDICT_EXIT_CODES["UNSTABLE"]
+    elif result["verdict"] == "PASS" and result.get("pass_qualified"):
+        code = QUALIFIED_PASS_EXIT
+    # The exit code was reachable only by running the command. A script reading the JSON
+    # afterwards, or anyone reading an archived result, had to re-derive it from the verdict
+    # plus two flags and would get it wrong on a suppressed UNSTABLE.
+    result["exit_code"] = code
+    (out / "check_result.json").write_text(json.dumps(result, indent=2) + "\n")
+    sys.exit(code)
 
 
 # --------------------------------------------------------------------------- main
