@@ -11,7 +11,10 @@ record v3.1.3) with one command. It runs in a pinned container with fixed seeds 
 expected output.
 
 It is the reference implementation of the Failure Detection Evaluation Specification (FDES)
-v1.0.0-draft ([github.com/mateenali66/failure-detection-evaluation-spec](https://github.com/mateenali66/failure-detection-evaluation-spec)).
+v1.0.0-draft ([github.com/mateenali66/failure-detection-evaluation-spec](https://github.com/mateenali66/failure-detection-evaluation-spec)),
+and it is the implementation reported under RFC 7942 in the Internet-Draft
+[draft-anjum-nmop-anomaly-detection-evaluation](https://datatracker.ietf.org/doc/draft-anjum-nmop-anomaly-detection-evaluation/).
+[How the two documents relate](#relationship-to-fdes-and-to-the-ietf-draft) sets out which is which.
 It ships a plugin interface, so an operator can put their own detector through the same
 procedure and get a verdict against the specification.
 
@@ -200,23 +203,58 @@ repetitions are {1,2}, {3,4}, {5,6}, {7,8} and {9,10}. The validation repetition
 for fold 5. Every run writes its seed policy, package versions and hardware to
 `out/<mode>/run_manifest.json`.
 
+## Relationship to FDES and to the IETF draft
+
+Two documents describe the procedure this code implements. They are both by the same author
+and they say the same things about metrics, but they are not the same kind of document and
+they carry different weight.
+
+**FDES v1.0.0-draft** ([spec repository](https://github.com/mateenali66/failure-detection-evaluation-spec))
+is self-published by the author. It generalizes the evaluation procedure used in the IEEE Access
+study into a specification with its own section numbering and versioning policy. Nobody has
+reviewed or approved it. It is the document this repository's check names and section numbers
+refer to, because the code was written against it.
+
+**draft-anjum-nmop-anomaly-detection-evaluation** is an Internet-Draft submitted to the IETF
+Network Management Operations (NMOP) working group. It adapts the same methodology to the
+working group's network anomaly detection documents and their terminology. It is an
+**individual Informational submission**. It has not been adopted by the working group, it is
+not an IETF standard, it is not an RFC, and nothing in it has IETF consensus. Its Section 7
+lists this repository under RFC 7942, which reports implementation status and confers no
+endorsement.
+
+The draft is the document to read if you came here from the IETF. FDES is the document the
+code's section numbers cite. The table below maps between them, so a reader of either can find
+the check that corresponds to what they read. Where the draft covers something FDES does not,
+or the reverse, the table says so rather than inventing a correspondence.
+
+The draft's scope is wider than this implementation. Following working group review, the draft
+covers rule-based and statistical detectors as well as machine-learning ones. The eight methods
+reproduced here are all machine-learning methods, so the model-family breadth of the draft is
+not demonstrated by the reproduction path. The `make check` path does accept binary alert CSVs
+from any detector, which is the part of that breadth this code does exercise.
+
 ## FDES v1.0.0-draft sections implemented
 
-| Check | Spec section | Where |
-|---|---|---|
-| Predict-all baseline F1 = 2p/(1+p) reported next to every operating-point score | 2, 7 | `fdes/checks.py::predict_all_f1`, `tables/fdes_checks.csv` |
-| Threshold-independent metrics from both families (AUC-ROC, PR-AUC) with random references (0.5, p) | 6, 7 | `fdes/checks.py::check_row` |
-| Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | `fdes/vus.py`, `tables/vus.csv`, pilot report |
-| Exclusion when AUC-ROC is at or below the random reference | 8a | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
-| Flag-everything guard: F1 within 5 percent of the floor, above or below it, with recall at or above 0.95 | 8b | `fdes/checks.py::flag_everything`, `sec8b_flag_everything` |
-| Flag-everything guard on the alerted rate. Fires when the alerted rate squared reaches twice prevalence, so a detector may alert often, or far more often than incidents occur, but not both | 8b | `fdes/checks.py::alert_rate_saturated`, `alert_rate_far_above_prevalence`, `make check` only |
-| Alert volume, as alerts per incident and per day. Nothing else here measures how often a detector pages | this tool's own check | `fdes/byod.py::alerts_per_incident`, `make check` only |
-| Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
-| Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | artifact `training.py`, and `fdes/protocol.py` for pilots |
-| Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
-| Episode-level detection rate. Step 6's detection-latency distribution is not implemented, here or in the artifact | 5 (step 6, in part) | artifact `training.py::evaluate_episode_detection` (`results/episode_results.csv`) |
-| Published seed policy, per-fold results, regeneration from archived scores | 9 | this README, `expected/model_results_per_fold.csv`, `make verify-archive` |
-| Sections 2, 6, 7 and 8 applied to an operator's own alert or score CSVs, with an explicit list of what the input could not support | 2, 6, 7, 8 | `fdes/byod.py`, `make check` |
+The "Draft section" column maps each check to
+[draft-anjum-nmop-anomaly-detection-evaluation](https://datatracker.ietf.org/doc/draft-anjum-nmop-anomaly-detection-evaluation/)
+as of revision -02.
+
+| Check | Spec section | Draft section | Where |
+|---|---|---|---|
+| Predict-all baseline F1 = 2p/(1+p) reported next to every operating-point score | 2, 7 | 3.2 | `fdes/checks.py::predict_all_f1`, `tables/fdes_checks.csv` |
+| Threshold-independent metrics from both families (AUC-ROC, PR-AUC) with random references (0.5, p) | 6, 7 | 3.1 | `fdes/checks.py::check_row` |
+| Range-based metrics (VUS-PR, VUS-ROC) from the raw score vectors | 6 | none, the draft defines no range-based metrics | `fdes/vus.py`, `tables/vus.csv`, pilot report |
+| Exclusion when AUC-ROC is at or below the random reference | 8a | 3.2 | `sec8a_auc_at_or_below_random`, model-level count in `below_chance.json` |
+| Flag-everything guard: F1 within 5 percent of the floor, above or below it, with recall at or above 0.95 | 8b | 3.2 | `fdes/checks.py::flag_everything`, `sec8b_flag_everything` |
+| Flag-everything guard on the alerted rate. Fires when the alerted rate squared reaches twice prevalence, so a detector may alert often, or far more often than incidents occur, but not both | 8b | none, the draft has no alerted-rate rule | `fdes/checks.py::alert_rate_saturated`, `alert_rate_far_above_prevalence`, `make check` only |
+| Alert volume, as alerts per incident and per day. Nothing else here measures how often a detector pages | this tool's own check | none, the draft has no alert-volume metric | `fdes/byod.py::alerts_per_incident`, `make check` only |
+| Degenerate-detector rule from the artifact's Table 12 support code (AUC <= 0.55 and F1 >= 0.95 x floor, `code/analysis/score_based_analyses.py`) | 8 | 3.2 | `degenerate_table12_rule`, `metric_reconciliation_from_raw_scores` |
+| Folds by repetition, threshold on a disjoint validation repetition, raw scores retained | 5 (steps 1 to 3) | 4.3 and 4.4; threshold statement in 3.2 | artifact `training.py`, and `fdes/protocol.py` for pilots |
+| Prevalence re-scoring at 1, 5, 10, 20 percent | 5 (step 5) | 3.2 | artifact `code/analysis/prevalence_sensitivity.py` on `results/raw_scores/` |
+| Episode-level detection rate. Step 6's detection-latency distribution is not implemented, here or in the artifact | 5 (step 6, in part) | 3.3 | artifact `training.py::evaluate_episode_detection` (`results/episode_results.csv`) |
+| Published seed policy, per-fold results, regeneration from archived scores | 9 | 5 and 6 | this README, `expected/model_results_per_fold.csv`, `make verify-archive` |
+| Sections 2, 6, 7 and 8 applied to an operator's own alert or score CSVs, with an explicit list of what the input could not support | 2, 6, 7, 8 | 3.1 and 3.2 | `fdes/byod.py`, `make check` |
 
 The 5 percent margin in the section 8b check is this package's choice of "the evaluator's
 stated margin". It is two sided, so F1 has to sit near the floor from either direction, and

@@ -54,3 +54,13 @@ references:
         given-names: Mateen Ali
     year: 2026
     url: https://github.com/mateenali66/failure-detection-evaluation-spec
+  - type: generic
+    title: >-
+      Evaluation Methodology for Network Anomaly Detection,
+      draft-anjum-nmop-anomaly-detection-evaluation (individual Internet-Draft,
+      Informational, not adopted by the IETF NMOP working group)
+    authors:
+      - family-names: Anjum
+        given-names: Mateen Ali
+    year: 2026
+    url: https://datatracker.ietf.org/doc/draft-anjum-nmop-anomaly-detection-evaluation/
