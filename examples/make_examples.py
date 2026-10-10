@@ -112,8 +112,8 @@ def main() -> None:
 
     # ------------------------------------------------------------------ a useless detector
     # A static threshold on a metric that swings with the nightly batch window. It fires
-    # every night from 02:00 to 04:30 whatever the service is doing, so it is a clock and
-    # not a detector. It happens to overlap one incident.
+    # every night from 02:00 to 04:30 whatever the service is doing, so it tracks the clock.
+    # It happens to overlap one incident.
     useless = [(day * 24 * 60 + 2 * 60, 150) for day in range(7)]
     write("alerts_useless.csv", ["start", "end", "severity", "monitor"],
           [[naive(at(s)), naive(at(s + d)), "warning", "cpu_over_80pct"] for s, d in useless])

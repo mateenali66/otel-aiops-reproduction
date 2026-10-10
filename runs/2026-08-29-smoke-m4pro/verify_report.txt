@@ -1,4 +1,4 @@
-verify: out/smoke against /Users/mateen/mateen/phd/papers/paper5-opentelemetry-aiops/reproduction/expected
+verify: out/smoke against expected
 ok   IsolationForest/logs/fold1/precision: got 0.4755 expected 0.4755 tol 0.020
 ok   IsolationForest/logs/fold1/recall: got 0.7420 expected 0.7420 tol 0.020
 ok   IsolationForest/logs/fold1/f1_score: got 0.5796 expected 0.5796 tol 0.020

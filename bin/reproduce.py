@@ -10,8 +10,11 @@ Subcommands
   verify-archive  recompute the archived tables from the archived raw scores (FDES section 9)
   estimate        print the runtime estimate without running anything
   pilot           evaluate your own detector under the FDES v1.0.0-draft procedure
-  check           run the FDES checks against your own alert or score CSVs; no Zenodo
-                  artifact and no detector plugin needed
+  check           run the FDES checks against your own alert or score CSVs. Needs no Zenodo
+                  artifact and no detector plugin
+  merge           join runs made one slice at a time (--folds, --models) into one run
+  paper-tables    the article's Tables 4 to 12 (Table 9 aside) from one results directory
+  figures         the article's Figures 2 to 7 from one results directory
 
 Exit codes
   0  the command finished and, for pilot and check, the verdict is PASS
@@ -24,9 +27,11 @@ Exit codes
      verdict either way, so fix the CSVs or the range and run it again
   4  check alerts mode only: the verdict is UNSTABLE. The same input gives different
      verdicts at different bucket sizes, so no single verdict is the result
+  5  check alerts mode only: PASS with a caveat, see `check -h`
 
-Everything runs on CPU. Seeds: base 42 + fold id (Python random, NumPy, PyTorch, Optuna TPE
-sampler seed 42 as in the artifact, IsolationForest random_state 42 as in the artifact).
+Everything runs on CPU. Python random, NumPy and PyTorch are seeded with 42 + fold id before
+each signal and each model. Optuna's TPE sampler (seed 42) and IsolationForest
+(random_state 42) keep the artifact's seeds.
 """
 from __future__ import annotations
 
@@ -103,11 +108,73 @@ def hardware() -> dict:
     return info
 
 
+REPRO_THREADS_DEFAULT = "8"
+
+
+def pinned_env() -> dict[str, str]:
+    """Thread count and instruction set for a training run, fixed whatever the host offers.
+
+    PyTorch, MKL, oneDNN, OpenBLAS and NumPy each choose kernels from the CPU they find and
+    split reductions across the threads they are given. Either one changes the scores in the
+    last digits, and the Optuna search can turn that into different hyperparameters. With
+    these pins a run is bit-identical on Intel Sapphire Rapids and Intel Ice Lake. It is not
+    bit-identical between Intel and AMD, where sqrt (inside Adam) and DAGMM's Cholesky still
+    differ under every MKL setting tried. The host's OMP_NUM_THREADS is ignored. Set
+    REPRO_THREADS to change the thread count. The numbers change with it.
+    """
+    threads = os.environ.get("REPRO_THREADS", REPRO_THREADS_DEFAULT)
+    env = {"OMP_NUM_THREADS": threads, "MKL_NUM_THREADS": threads,
+           "OPENBLAS_NUM_THREADS": threads, "REPRO_TORCH_THREADS": threads}
+    if platform.machine().lower() in ("x86_64", "amd64"):
+        env.update(ATEN_CPU_CAPABILITY="avx2", ONEDNN_MAX_CPU_ISA="AVX2",
+                   MKL_CBWR=os.environ.get("REPRO_MKL_CBWR", "AVX2,STRICT"),
+                   OPENBLAS_CORETYPE="Haswell",
+                   NPY_DISABLE_CPU_FEATURES=os.environ.get("REPRO_NPY_DISABLE", NPY_AVX512))
+    return env
+
+
+# NumPy dispatches its own SIMD loops, so it is pinned separately from PyTorch. These are the
+# AVX-512 names NumPy 1.26 dispatches on. An unknown name is an import error, and a known one
+# the CPU lacks is only a warning.
+NPY_AVX512 = ("AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL "
+              "AVX512_ICL AVX512_SPR")
+
+
+# Sequence models score from window 30 on, so their labels are shifted by SEQ_LENGTH - 1.
+# The archived training.py does this from a hardcoded list of models in two places, the
+# raw-score label files and late fusion, and the list omits DEEP_SVDD and DAGMM. Their labels
+# there sit 29 windows off their scores. Metrics computed inside the pipeline (Tables 4 to 8)
+# are unaffected. Tables 10 and 12, recomputed from the label files, move by at most 0.001 in
+# AUC and 0.004 in PR-AUC on the archived run. The article reports fusion for the other six
+# models only. The archived file is left unchanged. The fix is applied at import and recorded
+# in run_manifest.json.
+LABEL_SHIFT_BUG = 'if model_name in ("LSTM_AE", "Transformer_AE", "CNN1D_AE", "LSTM_VAE"):'
+LABEL_SHIFT_FIX = ('if model_name in ("LSTM_AE", "Transformer_AE", "CNN1D_AE", "LSTM_VAE", '
+                   '"DEEP_SVDD", "DAGMM"):')
+PATCHES_APPLIED = ["label alignment for DEEP_SVDD and DAGMM in raw_scores and late fusion "
+                   "(CHANGELOG 1.4.0)"]
+
+
+def load_training_patched():
+    import importlib.util
+    path = PIPELINE_DIR / "training.py"
+    src = path.read_text()
+    if src.count(LABEL_SHIFT_BUG) != 2:
+        sys.exit(f"{path} does not contain the expected label-alignment line exactly twice; "
+                 f"refusing to run a patched copy of a file that is not the archived one")
+    spec = importlib.util.spec_from_loader("training", loader=None, origin=str(path))
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(path)
+    sys.modules["training"] = module
+    exec(compile(src.replace(LABEL_SHIFT_BUG, LABEL_SHIFT_FIX), str(path), "exec"), module.__dict__)
+    return module
+
+
 def import_training(env: dict[str, str]):
     """Import the artifact's training.py with the run configuration in the environment.
 
-    Forces CPU (the artifact auto-selects CUDA or MPS when present) and seeds every fold
-    with base 42 + fold id before the artifact's own train_signal() runs.
+    Forces CPU (the artifact auto-selects CUDA or MPS when present) and seeds every
+    (model, signal, fold) cell with base 42 + fold id before its Optuna search starts.
     """
     for k, v in env.items():
         os.environ[k] = v
@@ -115,23 +182,41 @@ def import_training(env: dict[str, str]):
     import torch
     torch.backends.mps.is_available = lambda: False
     torch.cuda.is_available = lambda: False
-    if os.environ.get("REPRO_TORCH_THREADS"):
-        torch.set_num_threads(int(os.environ["REPRO_TORCH_THREADS"]))
+    torch.set_num_threads(int(os.environ.get("REPRO_TORCH_THREADS", REPRO_THREADS_DEFAULT)))
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    # oneDNN picks convolution and matmul blocking from the cache sizes it detects, so the
+    # same pinned instruction set still sums in a different order on a different CPU.
+    torch.backends.mkldnn.enabled = os.environ.get("REPRO_MKLDNN", "0") == "1"
     sys.path.insert(0, str(PIPELINE_DIR))
-    import training  # noqa: E402
+    training = load_training_patched()
     assert training.DEVICE == "cpu", training.DEVICE
 
-    original = training.train_signal
-
-    def seeded_train_signal(signal_type, df, fold_id, *a, **k):
+    def reseed(fold_id: int) -> int:
         seed = 42 + fold_id
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        return seed
+
+    original_signal = training.train_signal
+
+    def seeded_train_signal(signal_type, df, fold_id, *a, **k):
+        seed = reseed(fold_id)
         log(f"  [seed] {signal_type} fold {fold_id}: base 42 + {fold_id} = {seed}")
-        return original(signal_type, df, fold_id, *a, **k)
+        return original_signal(signal_type, df, fold_id, *a, **k)
+
+    # Reseeding before each model makes a cell's numbers independent of which other models
+    # share the process, so a `--models` slice matches a full run and the grid can be split
+    # across machines.
+    original_study = training.run_optuna_study
+
+    def seeded_study(model_name, *a, **k):
+        seed = reseed(k.get("fold_id", 0))
+        log(f"  [seed] {model_name} {k.get('signal_type', '')} fold {k.get('fold_id')}: {seed}")
+        return original_study(model_name, *a, **k)
 
     training.train_signal = seeded_train_signal
+    training.run_optuna_study = seeded_study
     return training
 
 
@@ -152,6 +237,7 @@ def cap_deep_epochs(training, max_epochs: int) -> None:
 # --------------------------------------------------------------------------- fetch
 
 def cmd_fetch(args) -> None:
+    import urllib.error
     import urllib.request
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     sums = load_checksums()
@@ -166,9 +252,19 @@ def cmd_fetch(args) -> None:
     else:
         url = f"https://zenodo.org/api/records/{ZENODO_RECORD}/files/{ZENODO_FILE}/content"
         log(f"downloading {url}")
-        with urllib.request.urlopen(url, timeout=120) as r, open(target, "wb") as f:
-            while chunk := r.read(1 << 20):
-                f.write(chunk)
+        # Zenodo returns 502 and 504 from time to time, so the download is retried.
+        for attempt in range(1, 6):
+            try:
+                with urllib.request.urlopen(url, timeout=120) as r, open(target, "wb") as f:
+                    while chunk := r.read(1 << 20):
+                        f.write(chunk)
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if attempt == 5:
+                    sys.exit(f"download failed after 5 attempts: {e}. Download the zip by hand "
+                             f"and run `make fetch FROM_ZIP=path/to/{ZENODO_FILE}`")
+                log(f"  attempt {attempt} failed ({e}); retrying in {15 * attempt} s")
+                time.sleep(15 * attempt)
     actual = md5sum(target)
     if actual != expected_md5:
         sys.exit(f"CHECKSUM MISMATCH for {ZENODO_FILE}: expected md5 {expected_md5}, got {actual}")
@@ -189,7 +285,10 @@ def run_pipeline(out_dir: Path, signals: list[str], models: list[str], folds: li
     cfg = dict(out=str(out_dir), signals=signals, models=models, folds=folds,
                n_trials_classical=n_trials_classical, n_trials_deep=n_trials_deep,
                max_epochs=max_epochs, label=label)
-    subprocess.run([sys.executable, str(Path(__file__).resolve()), "_run", json.dumps(cfg)], check=True)
+    # The pinning has to be in place before the child imports numpy or torch, which read it
+    # once at load time, so it goes into the child's environment rather than os.environ here.
+    subprocess.run([sys.executable, str(Path(__file__).resolve()), "_run", json.dumps(cfg)],
+                   check=True, env={**os.environ, **pinned_env()})
     return json.loads((Path(out_dir) / "run_manifest.json").read_text())
 
 
@@ -205,6 +304,9 @@ def cmd_run(args) -> None:
         "PAPER5_N_TRIALS_CLASSICAL": str(cfg["n_trials_classical"]),
         "PAPER5_N_TRIALS_DEEP": str(cfg["n_trials_deep"]),
         "PAPER5_SIGNAL_WORKERS": "1",
+        # Repeated here so a direct `_run` call is pinned too. Nothing above has imported
+        # numpy or torch yet, so it still takes effect.
+        **pinned_env(),
     }
     training = import_training(env)
     if cfg["max_epochs"] is not None:
@@ -221,9 +323,13 @@ def cmd_run(args) -> None:
         "label": cfg["label"], "signals": cfg["signals"], "models": cfg["models"], "folds": cfg["folds"],
         "n_trials_classical": cfg["n_trials_classical"], "n_trials_deep": cfg["n_trials_deep"],
         "max_epochs_deep": cfg["max_epochs"], "wall_clock_s": round(wall, 1),
-        "seed_policy": "base 42 + fold id (random, numpy, torch); Optuna TPESampler seed 42; "
+        "seed_policy": "base 42 + fold id (random, numpy, torch), reset before each signal and "
+                       "before each model's Optuna search; Optuna TPESampler seed 42; "
                        "IsolationForest random_state 42",
         "device": training.DEVICE, "hardware": hardware(), "env": env,
+        "pinned": {**{k: os.environ.get(k) for k in pinned_env()},
+                   "mkldnn_enabled": training.torch.backends.mkldnn.enabled if hasattr(training, "torch") else None},
+        "patches_applied_to_archived_training_py": PATCHES_APPLIED,
         "artifact": {"doi": ZENODO_DOI, "file": ZENODO_FILE,
                      "md5": load_checksums()["files"][ZENODO_FILE]["md5"]},
     }
@@ -316,6 +422,65 @@ def cmd_reproduce(args) -> None:
         f"(Optuna trials: 10 classical, 25 deep, published budget)")
     run_pipeline(Path(args.out), signals, models, folds, n_trials_classical=10, n_trials_deep=25,
                  max_epochs=None, label="full")
+
+
+def cmd_merge(args) -> None:
+    """Join runs made one slice at a time (FOLDS=, MODELS=) into one results directory.
+
+    Every slice must cover all three signals, because fusion is computed inside a run from
+    one model's three signals. Each (model, signal, fold) cell is seeded on its own, so merged
+    slices give the same numbers as one `make reproduce`.
+    """
+    import pandas as pd
+    out = Path(args.out)
+    parts = [Path(p) for p in args.parts]
+    for p in parts:
+        mr = p / "results" / "model_results.csv"
+        if not mr.exists():
+            sys.exit(f"{p} has no results/model_results.csv")
+        signals = set(pd.read_csv(mr)["signal_type"])
+        if signals != set(ALL_SIGNALS):
+            sys.exit(f"{p} covers {sorted(signals)}; every slice needs all three signals "
+                     f"so its fusion rows exist")
+    merge_runs(out, parts)
+    seen = pd.read_csv(out / "results" / "model_results.csv")
+    dupes = seen.duplicated(["model", "signal_type", "fold"]).sum()
+    if dupes:
+        sys.exit(f"{dupes} (model, signal, fold) cells appear in more than one slice")
+    from fdes.tables import build_tables
+    tables = build_tables(out / "results", out / "tables", ARTIFACT_DIR / "code")
+    manifests = [json.loads((p / "run_manifest.json").read_text()) for p in parts
+                 if (p / "run_manifest.json").exists()]
+    (out / "run_manifest.json").write_text(json.dumps(
+        {"label": "merged", "parts": [str(p) for p in parts], "tables": tables,
+         "part_manifests": manifests}, indent=2))
+    log(f"merged {len(parts)} slices, {len(seen)} cells, into {out}")
+    for s in tables["skipped"]:
+        log(f"  skipped: {s}")
+
+
+def resolve_results(spec: str, out: str | None) -> tuple[Path, Path]:
+    """'archive' means the Zenodo results the article was built from."""
+    if spec == "archive":
+        require_artifact()
+        results = ARTIFACT_DIR / "data" / "results" / "merged"
+        return results, Path(out) if out else OUT_DIR / "archive" / "paper"
+    results = Path(spec)
+    return results, Path(out) if out else results.parent / "paper"
+
+
+def cmd_paper_tables(args) -> None:
+    from fdes.paper import write_paper_tables
+    results, out = resolve_results(args.results, args.out)
+    for line in write_paper_tables(results, out, ARTIFACT_DIR):
+        log(line)
+
+
+def cmd_figures(args) -> None:
+    from fdes.paper import write_figures
+    results, out = resolve_results(args.results, args.out)
+    for line in write_figures(results, out):
+        log(line)
 
 
 def parse_folds(spec: str) -> list[int]:
@@ -478,24 +643,20 @@ def cmd_verify_archive(args) -> None:
 # --------------------------------------------------------------------------- verdicts
 
 # PASS, EXCLUDE and INSUFFICIENT are three different answers, so they get three exit codes.
-# EXCLUDE means the detector is not worth deploying. INSUFFICIENT means the input could not
-# support a verdict either way, which is a problem with the input and not with the detector.
-# Both the pilot path and the check path use them.
+# EXCLUDE means the detector failed a check. INSUFFICIENT means the input could not support
+# a verdict either way. Both the pilot path and the check path use them.
 VERDICT_EXIT_CODES = {"PASS": 0, "EXCLUDE": 2, "INSUFFICIENT": 3, "UNSTABLE": 4}
-# A PASS that only exists because an exclusion was suppressed, or that sits on a detector
-# alerting far more often than there were incidents to find, is not a plain PASS. It gets its
-# own code so a script can tell the two apart. Whether to fail on it is the reader's call:
-# treat 5 as passing if the report's caveat is acceptable on your on-call load, and as
-# failing if it is not.
+# A PASS that exists only because an exclusion was suppressed, or that sits on a detector
+# alerting far more often than there were incidents to find, gets its own code so a script
+# can tell it from a plain PASS. Whether to fail a build on it is the user's decision.
 QUALIFIED_PASS_EXIT = 5
 
 
 class Parser(argparse.ArgumentParser):
     """argparse exits 2 on a usage error, and 2 is this tool's code for EXCLUDE.
 
-    A reviewer hit this live. A shell quoting mistake split a flag, argparse rejected it and
-    exited 2, and nine runs looked like nine EXCLUDE verdicts. It was caught only because no
-    output files had been written. A usage error is not a verdict, so it exits 1.
+    A usage error exits 1 here instead, so a mistyped flag cannot read as an EXCLUDE verdict
+    to a script that checks the exit code.
     """
 
     def error(self, message: str):
@@ -504,8 +665,7 @@ class Parser(argparse.ArgumentParser):
                          f"This is a usage error, not a verdict. Exit 1 means the command "
                          f"was wrong. Verdicts use 0, 2, 3, 4 and 5.\n")
         sys.exit(1)
-# A real failure exits 1 and nothing else does, so 2 is never a crash. Continuous
-# integration reads 2 as "this detector was rejected" and 1 as "this command broke".
+# Only failures exit 1, so 2 always means a rejected detector and 1 a broken command.
 EXIT_ERROR = 1
 
 EXIT_CODE_HELP = """exit codes
@@ -584,18 +744,16 @@ def cmd_check(args) -> None:
     out = byod.write_outputs(result, Path(args.out) / label)
     log((out / "check_report.md").read_text())
     log(f"written: {out}/check_result.json, check_report.md")
-    # --no-sweep holds the reported verdict at the bucket you picked. It must never turn a
-    # non-zero exit into a zero one, or a continuous integration job reading only the exit
-    # code passes on a run whose verdict is not stable across bucket sizes and never sees
-    # the text saying so. A suppressed UNSTABLE exits as UNSTABLE.
+    # --no-sweep holds the reported verdict at the chosen bucket but never turns a non-zero
+    # exit into zero. A suppressed UNSTABLE still exits as UNSTABLE, so a job that reads only
+    # the exit code does not pass an unstable run.
     code = VERDICT_EXIT_CODES[result["verdict"]]
     if result.get("results", {}).get("sweep_suppressed_unstable"):
         code = VERDICT_EXIT_CODES["UNSTABLE"]
     elif result["verdict"] == "PASS" and result.get("pass_qualified"):
         code = QUALIFIED_PASS_EXIT
-    # The exit code was reachable only by running the command. A script reading the JSON
-    # afterwards, or anyone reading an archived result, had to re-derive it from the verdict
-    # plus two flags and would get it wrong on a suppressed UNSTABLE.
+    # The exit code is written to check_result.json too, so a script reading the JSON later
+    # does not have to re-derive it from the verdict and two flags.
     result["exit_code"] = code
     (out / "check_result.json").write_text(json.dumps(result, indent=2) + "\n")
     sys.exit(code)
@@ -626,6 +784,23 @@ def main() -> None:
 
     s = sub.add_parser("verify"); s.add_argument("--out", default=str(OUT_DIR / "smoke")); s.set_defaults(fn=cmd_verify)
     s = sub.add_parser("verify-archive"); s.set_defaults(fn=cmd_verify_archive)
+
+    s = sub.add_parser("merge", help="join slices run with FOLDS= or MODELS= into one run")
+    s.add_argument("--out", default=str(OUT_DIR / "full"))
+    s.add_argument("parts", nargs="+", help="the --out directories of the slices")
+    s.set_defaults(fn=cmd_merge)
+
+    s = sub.add_parser("paper-tables", help="Tables 4 to 12 in the article's layout")
+    s.add_argument("--results", default=str(OUT_DIR / "full" / "results"),
+                   help="a run's results/ directory, or 'archive' for the Zenodo results")
+    s.add_argument("--out", default=None, help="default: <results>/../paper")
+    s.set_defaults(fn=cmd_paper_tables)
+
+    s = sub.add_parser("figures", help="Figures 2 to 7 in the article's layout")
+    s.add_argument("--results", default=str(OUT_DIR / "full" / "results"),
+                   help="a run's results/ directory, or 'archive' for the Zenodo results")
+    s.add_argument("--out", default=None, help="default: <results>/../paper")
+    s.set_defaults(fn=cmd_figures)
 
     s = sub.add_parser("pilot", epilog=EXIT_CODE_HELP,
                        formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -680,23 +855,20 @@ def main() -> None:
     s.add_argument("--scope-col", default=None,
                    help="name the optional service or scope column in the alerts CSV. When "
                         "both files carry one, the report says how far the two exports "
-                        "overlap and warns when they may describe different systems. This "
-                        "REPORTS ONLY. It never filters either file and it never changes a "
-                        "verdict, so every alert is still scored against every incident. "
-                        "Filter the exports yourself if you want scope-aware scoring.")
+                        "overlap and warns when they may describe different systems. It only "
+                        "reports. It never filters either file or changes a verdict, so "
+                        "every alert is still scored against every incident. Filter the "
+                        "exports yourself for scope-aware scoring.")
     s.add_argument("--incident-scope-col", default=None,
                    help="name the optional service or scope column in the incidents CSV. "
                         "Defaults to --scope-col.")
     s.add_argument("--no-sweep", action="store_true",
                    help="in alerts mode, hold the reported verdict at the bucket you "
                         "passed. The sweep still runs and the report still shows it, so a "
-                        "run that would have been UNSTABLE says so instead of coming back "
-                        "as a clean PASS. The exit code is not held: a suppressed UNSTABLE "
-                        "still exits 4, because this flag must not turn a failing run into "
-                        "a passing exit code. check_result.json carries "
-                        "sweep_suppressed_unstable so a script can tell the two apart. The "
-                        "sweep decides the verdict by default because a coarse bucket can "
-                        "move it on its own.")
+                        "run that would have been UNSTABLE says so. The exit code is not "
+                        "held: a suppressed UNSTABLE still exits 4, and check_result.json "
+                        "carries sweep_suppressed_unstable. By default the sweep decides the "
+                        "verdict, because a coarse bucket can move it on its own.")
     s.add_argument("--label", default=None, help="subdirectory name under --out")
     s.add_argument("--out", default=str(OUT_DIR / "check"))
     s.set_defaults(fn=cmd_check)

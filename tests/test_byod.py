@@ -39,8 +39,8 @@ INCIDENTS = ("start,end\n"
 N_ANOMALOUS = 90
 
 # The same two incidents moved two months later, so nothing lands inside the day above.
-# This is the shape real data takes when the incident export and the observation window
-# come from different systems.
+# This happens when the incident export and the observation window come from different
+# systems.
 INCIDENTS_OUTSIDE = ("start,end\n"
                      "2026-05-01T02:00:00Z,2026-05-01T03:00:00Z\n"
                      "2026-05-02T14:00:00Z,2026-05-02T14:30:00Z\n")
@@ -52,13 +52,13 @@ OVERLAPPING_ALERTS = ("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
                       "2026-03-01T02:30:00Z,2026-03-01T04:00:00Z\n"
                       "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
 
-# The shape of the real PagerDuty export that made the forgotten-ticket guard necessary.
-# 23 incidents over a 35.6 day window. Two of them had been sitting open for 13 and 12 days
-# and held almost all of the incident time. The other 21 held about 16 hours between them.
+# A forgotten-ticket shape. 23 incidents over a 35.6 day window, two of them left open for
+# 13 and 12 days and holding almost all of the incident time. The other 21 hold about 16
+# hours between them.
 TICKET_FROM = "2026-03-01T00:00:00Z"
 TICKET_TO = "2026-04-05T14:24:00Z"          # 35.6 days after TICKET_FROM
 TICKET_MINUTES = [12, 18, 25, 31, 44, 52, 61, 70, 22, 38, 47,
-                  55, 63, 90, 105, 17, 29, 36, 41, 58, 75]    # 21 real incidents
+                  55, 63, 90, 105, 17, 29, 36, 41, 58, 75]    # 21 ordinary incidents
 
 
 def at(days: float) -> str:
@@ -193,9 +193,8 @@ class TestFlagEverything(TempCase):
         self.assertTrue(r["results"]["degenerate_output"]["alerts_on_everything"])
 
     def test_alerting_on_most_of_the_range_is_excluded_even_when_f1_clears_the_floor(self):
-        # The numbers a real Splunk and PagerDuty export produced. F1 sits 5.6 percent
-        # above the floor, which is outside the two-sided section 8b margin by six tenths
-        # of a percentage point, so nothing used to exclude it and it reported PASS.
+        # F1 sits 5.6 percent above the floor, six tenths of a percentage point outside the
+        # two-sided section 8b margin, so only the alerted-rate guard can exclude it.
         r = self.real_flag_everything()
         res = r["results"]
         self.assertAlmostEqual(res["prevalence"], 0.0431, places=4)
@@ -203,7 +202,7 @@ class TestFlagEverything(TempCase):
         self.assertAlmostEqual(res["f1_predict_all"], 0.0826, places=4)
         self.assertEqual(res["recall"], 1.0)
         self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.9451, places=4)
-        # The old rule really does miss it, and the new one really does catch it.
+        # The F1 form of section 8b misses it and the alerted-rate guard catches it.
         self.assertFalse(res["checks"]["sec8b_flag_everything"])
         self.assertFalse(res["checks"]["no_lift_over_predict_all"])
         self.assertFalse(res["checks"]["degenerate_output"])
@@ -221,8 +220,7 @@ class TestFlagEverything(TempCase):
 
     def test_a_perfect_detector_still_passes(self):
         # A perfect detector alerts exactly as often as things are anomalous, so the
-        # alerted rate equals prevalence and the guard cannot reach it. This is the case
-        # the one-sided version of section 8b used to exclude.
+        # alerted rate equals prevalence and the guard cannot reach it.
         r = self.alerts("2026-03-01T02:00:00Z,2026-03-01T03:00:00Z\n"
                         "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
         res = r["results"]
@@ -299,19 +297,16 @@ class TestFlagEverything(TempCase):
 
 
 class TestAlertRateCurve(TempCase):
-    """The guard is one curve now, because both threshold shapes before it had flat regions.
+    """The guard is one curve with no flat region.
 
     A threshold that is constant in prevalence has a stretch where the constant decides
-    alone and the ratio never binds. The single-condition shape was flat below a prevalence
-    of 0.125, which is almost all real data. The two-path shape narrowed that but kept two
-    flat stretches, and at a prevalence of 0.002 a detector alerting a hundred times more
-    often than anything was wrong still passed. The curve fires when the alerted rate
-    squared reaches twice prevalence, which has no flat region anywhere and still cannot
-    catch a perfect detector.
+    alone and the ratio never binds. At a prevalence of 0.002 such a threshold passes a
+    detector alerting a hundred times more often than anything was wrong. The curve fires
+    when the alerted rate squared reaches twice prevalence and still cannot catch a perfect
+    detector.
     """
 
-    # 57 anomalous buckets of 1440, so prevalence is 0.0396. This is a constructed boundary
-    # case, not a measurement taken from anyone's production data.
+    # 57 anomalous buckets of 1440, so prevalence is 0.0396. A constructed boundary case.
     INCIDENT = "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:57:00Z\n"
 
     def at_rate(self, alerted_buckets: int, **kwargs):
@@ -341,8 +336,7 @@ class TestAlertRateCurve(TempCase):
 
     def test_the_original_single_condition_shape_would_have_passed_it(self):
         res = self.at_rate(576)["results"]
-        # Nothing else in the procedure touches this run. Every other check reports pass,
-        # so under the original shape it was a PASS at exit 0.
+        # Every other check reports pass, so only the curve excludes this run.
         self.assertGreater(res["f1_over_floor"], 2.0)
         self.assertFalse(res["checks"]["no_lift_over_predict_all"])
         self.assertFalse(res["checks"]["sec8b_flag_everything"])
@@ -350,9 +344,8 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(len(res["exclusion_reasons"]), 1)
 
     def test_the_exclusion_says_it_is_about_volume_and_not_about_detection(self):
-        # A real detector that finds everything and pages too much is the case this guard
-        # is most likely to fire on. Without this clause an operator reads EXCLUDE plus a
-        # sentence about alert volume and concludes the detector does not detect.
+        # A detector that finds everything but pages too much is the likely case for this
+        # guard, so the exclusion also says what the detector found.
         res = self.at_rate(576)["results"]
         reasons = " ".join(res["exclusion_reasons"])
         self.assertGreater(res["f1_over_floor"], 1.0)
@@ -361,7 +354,7 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("judgement about your on-call load", reasons)
 
     def test_a_detector_with_no_lift_gets_no_counterweight(self):
-        # The clause is only honest when the detector actually found something.
+        # The clause only appears when the detector found something.
         res = TestFlagEverything.real_flag_everything(self)["results"]
         self.assertIn("alert_rate_far_above_prevalence", res["checks"])
         if res["f1_over_floor"] is not None and res["f1_over_floor"] <= 1.0 \
@@ -373,8 +366,7 @@ class TestAlertRateCurve(TempCase):
         """A detector that catches part of the incident and alerts a lot of clean time.
 
         `at_rate` above always catches the incident whole, so recall is 1.0 and the lift
-        never comes down near the floor. The overlap this exercises needs partial recall,
-        which is the shape the real export had.
+        never comes down near the floor. The overlap this exercises needs partial recall.
         """
         i_end_h, i_end_m = divmod(2 * 60 + incident_minutes, 60)
         incidents = write(self.tmp, "partial.csv",
@@ -388,12 +380,10 @@ class TestAlertRateCurve(TempCase):
             incidents=incidents, sweep=False)
 
     def test_the_counterweight_and_the_near_floor_notice_never_both_fire(self):
-        # Found on real data. The counterweight started at a bare lift of 1.0 and the
-        # near-floor notice covers a band of 0.20 either side of 1.0, so a lift between
-        # 1.0 and 1.2 printed both, a few lines apart, about the same number, saying
-        # opposite things: "the detector is finding incidents" against "scores about what
-        # flagging every bucket would score". Inside that band the near-floor sentence is
-        # the honest one. This sweep walks the lift through the whole band.
+        # The near-floor notice covers a band of 0.20 either side of a lift of 1.0. Inside
+        # it the counterweight ("the detector is finding incidents") must stay quiet, or the
+        # report says two opposite things about one number. This sweep walks the lift
+        # through the whole band.
         hits = 0
         for clean in range(400, 860, 20):
             r = self.partial_recall(40, 21, clean)
@@ -409,9 +399,8 @@ class TestAlertRateCurve(TempCase):
         self.assertGreater(hits, 0)
 
     def test_a_lift_just_over_the_floor_gets_the_near_floor_sentence_not_the_other(self):
-        # The shape of the real row that found this. Lift 1.05 is five percent better than
-        # flagging every single bucket, while missing about half the incident time. That
-        # is not evidence that a detector is finding incidents.
+        # Lift 1.05 is five percent better than flagging every bucket while missing about
+        # half the incident time, which is no evidence that the detector finds incidents.
         r = self.partial_recall(40, 21, 679)
         res = r["results"]
         self.assertAlmostEqual(res["f1_over_floor"], 1.05, places=2)
@@ -450,9 +439,9 @@ class TestAlertRateCurve(TempCase):
     def test_a_coarse_bucket_does_not_condemn_a_detector_that_alerts_briefly(self):
         # The guard reads bucket occupancy. A window shorter than the bucket claims the
         # whole bucket, so at a coarse bucket a detector that alerts briefly and often reads
-        # exactly like one that alerts continuously. This detector was excluded at the hourly
-        # bucket with a report saying it alerted 30 times as often as anything was wrong,
-        # when it alerts 1.5 times as often. The rate was the bucket, not the detector.
+        # exactly like one that alerts continuously. At the hourly bucket the rate reads
+        # 30 times prevalence while the detector alerts 1.5 times as often as anything is
+        # wrong, so the exclusion is suppressed.
         for bucket in ("1m", "5m", "15m", "1h"):
             r = self.oncall(bucket)
             res = r["results"]
@@ -497,10 +486,9 @@ class TestAlertRateCurve(TempCase):
             self.assertFalse(r["results"]["alert_rate_quantised"], bucket)
 
     def test_the_sweep_applies_the_suppression_too(self):
-        # The sweep recomputed every row without the quantisation suppression, so the report
-        # carried a PASS headline above a table whose row for the same bucket said EXCLUDE,
-        # and declared the run unstable on the strength of a disagreement with itself. Only
-        # an end-to-end run shows this, because each half is correct on its own.
+        # Every sweep row applies the same quantisation suppression as the headline run, so
+        # the table cannot contradict the headline at the same bucket. Only an end-to-end
+        # run shows this, because each half is correct on its own.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -525,7 +513,7 @@ class TestAlertRateCurve(TempCase):
             self.assertEqual(row["verdict"], "PASS", row["bucket"])
 
     def abusive(self, window_seconds: int, rows: int = 5184, zero_share: float = 0.0):
-        """Many short alert windows. The shape that walks through the suppression."""
+        """Many short alert windows, which the suppression must not excuse."""
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -545,10 +533,9 @@ class TestAlertRateCurve(TempCase):
                                  sweep=False)
 
     def test_short_windows_cannot_buy_their_way_out_of_the_guard(self):
-        # The gate before this one counted rows where end equals start, and a one-second
-        # window walks straight past that. Most real exports emit an end time. This detector
-        # pages 173 times a day at a precision of 0.014 and used to come back PASS at exit 0
-        # with no check firing at all.
+        # A gate on zero-length rows misses one-second windows, and most exports emit an end
+        # time. This detector pages 173 times a day at a precision of 0.014 and must be
+        # excluded.
         for seconds in (1, 6, 30):
             r = self.abusive(seconds)
             res = r["results"]
@@ -558,9 +545,9 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(self.abusive(1, zero_share=0.19)["verdict"], "EXCLUDE")
 
     def test_the_duty_cycle_alone_cannot_separate_the_two_cases(self):
-        # This is why the count gate exists. The abuser occupies LESS time than the
-        # legitimate detector, so ranked by duty cycle it looks better behaved. Any gate
-        # built on duty cycle or window length alone ranks these two the wrong way round.
+        # The abuser occupies less time than the legitimate detector, so a gate built on duty
+        # cycle or window length alone ranks the two the wrong way round. The count gate
+        # separates them.
         good = self.oncall("1h")["results"]
         bad = self.abusive(1)["results"]
         self.assertLess(bad["alert_duty_cycle"], good["alert_duty_cycle"])
@@ -568,8 +555,8 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(self.oncall("1h")["verdict"], "PASS")
 
     def test_neither_suppression_gate_holds_on_its_own(self):
-        # Tuning the windows to sit under the leverage cap pushes the rate per hour over,
-        # and thinning the alerts to get under the rate per hour pushes the leverage over.
+        # Windows tuned to keep leverage under the cap push alerts per incident over the
+        # limit, and alerts thinned to get under the limit push leverage over the cap.
         tuned = self.abusive(6)["results"]
         self.assertLessEqual(tuned["alert_rate_leverage"], byod.SUPPRESSION_MAX_LEVERAGE)
         self.assertGreater(tuned["alerts_per_incident"], byod.ALERTS_PER_INCIDENT_LIMIT)
@@ -581,7 +568,7 @@ class TestAlertRateCurve(TempCase):
 
     def test_a_small_export_is_not_called_dominated_by_arithmetic(self):
         # Two or three rows trip a 30 percent share whenever they are not near-identical, so
-        # any small export produced a false positive. Reported as not applicable instead.
+        # small exports are reported as not applicable.
         for n in (2, 3, 4):
             rows = "".join(f"2026-03-01T{2 + k:02d}:00:00Z,2026-03-01T{2 + k:02d}:{k * 9:02d}:00Z\n"
                            for k in range(1, n + 1))
@@ -591,9 +578,7 @@ class TestAlertRateCurve(TempCase):
             self.assertFalse(r["results"]["alert_concentration"]["dominated"], n)
 
     def test_alerting_far_more_often_than_there_were_incidents_is_reported(self):
-        # Nothing else in the procedure measures how often a detector pages. Both reviewers
-        # reached that from opposite ends, one by walking through the guard and one by
-        # finding a clean PASS on a detector alerting 174 times a day.
+        # Nothing else in the procedure measures how often a detector pages.
         r = self.abusive(1, rows=600)
         res = r["results"]
         self.assertGreater(res["alerts_per_incident"], byod.ALERTS_PER_INCIDENT_LIMIT)
@@ -604,8 +589,7 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("judgement about your on-call load", report)
 
     def test_a_pass_carrying_a_caveat_is_marked_and_gets_its_own_exit_code(self):
-        # A reader who only sees the exit code could not tell a clean PASS from one that
-        # exists because an exclusion was suppressed.
+        # A reader who sees only the exit code can tell this PASS from a plain one.
         r = self.oncall("1h")
         self.assertEqual(r["verdict"], "PASS")
         self.assertTrue(r["results"]["alert_rate_quantised"])
@@ -615,8 +599,7 @@ class TestAlertRateCurve(TempCase):
         self.assertFalse(clean["results"]["pass_qualified"])
 
     def test_a_usage_error_does_not_look_like_a_verdict(self):
-        # A shell quoting mistake split a flag, argparse exited 2, and nine runs read as nine
-        # EXCLUDE verdicts. It was caught only because no output files had been written.
+        # A usage error exits 1, so a mistyped flag cannot read as an EXCLUDE.
         p = subprocess.run(
             [sys.executable, str(ROOT / "bin" / "reproduce.py"), "check", "--no-such-flag"],
             cwd=ROOT, capture_output=True, text=True)
@@ -626,10 +609,7 @@ class TestAlertRateCurve(TempCase):
 
     def test_the_guard_is_not_reported_as_passed_when_it_cannot_fire(self):
         # The bar is the square root of twice prevalence, so above a prevalence of 0.5 it
-        # exceeds 1.0 and no alerted rate can reach it. A real export at 0.853 printed a bar
-        # of 1.306 next to the word pass, for a check that was incapable of failing. The
-        # docstring proved the safe direction, that a perfect detector can never be caught,
-        # and nobody wrote down the dual.
+        # exceeds 1.0 and no alerted rate can reach it. The table says so instead of pass.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -672,10 +652,10 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("silently disables the flag-everything guard", report)
 
     def test_fan_out_duplicates_are_named_rather_than_counted_silently(self):
-        # A real export delivered every notification to four email recipients, so each alert
-        # appeared four times with a distinct row identifier and an identical timestamp. That
-        # multiplied the alerted rate and alerts per incident by four, and made the overlap
-        # notice describe a distribution list as a temporal property of the detector.
+        # Some exports write one row per notification recipient, so each alert appears
+        # several times with a distinct row identifier and the same timestamp. That
+        # multiplies alerts per incident, and the overlap notice would describe a
+        # distribution list as a property of the detector.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         iso = lambda x: x.isoformat().replace("+00:00", "Z")
@@ -705,9 +685,8 @@ class TestAlertRateCurve(TempCase):
         self.assertNotIn("Duplicate alert rows", byod.render_report(r))
 
     def test_the_sweep_names_the_check_that_decided_each_row(self):
-        # The prose asserted one mechanism unconditionally. On a real export the lift cleared
-        # the floor at every bucket and every flip came from the alerted-rate guard, so the
-        # stated cause was confidently wrong while the verdict was right.
+        # The flips can come from the alerted-rate guard while the lift clears the floor at
+        # every bucket, so the table names the check that decided each row.
         r = self.alerts("2026-03-01T04:00:00Z,2026-03-01T10:30:00Z\n"
                         "2026-03-01T14:00:00Z,2026-03-01T14:30:00Z\n")
         report = byod.render_report(r)
@@ -757,8 +736,8 @@ class TestAlertRateCurve(TempCase):
     def test_nothing_can_pass_where_nothing_can_fail(self):
         # Above a prevalence of 0.5 the guard bar exceeds an alerted rate of 1.0 and cannot
         # fire, section 8b needs recall at or above 0.95, and alerts mode has no rank metric.
-        # A detector alerting on 88 percent of the timeline came back PASS at exit 0 with not
-        # one check firing. That is an input that cannot produce a verdict, not a pass.
+        # A detector alerting on 88 percent of the timeline has nothing that could fail it,
+        # so the run is INSUFFICIENT.
         r = self.high_prevalence(25.6, 26.4)
         res = r["results"]
         self.assertGreater(res["prevalence"], 0.5)
@@ -780,9 +759,8 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(r["verdict"], "PASS")
 
     def test_the_duplicate_notice_does_not_claim_the_alerted_rate_is_multiplied(self):
-        # It said "the alerted rate and the alerts per incident are both multiplied by it".
-        # The alerted rate is not. Occupancy is a union and duplicate windows claim buckets
-        # that were already claimed. Measured: identical alerted rate at every multiplicity.
+        # Duplicates multiply alerts per incident but not the alerted rate, because occupancy
+        # is a union and duplicate windows claim buckets already claimed.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         iso = lambda x: x.isoformat().replace("+00:00", "Z")
@@ -803,9 +781,8 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(rates[0], rates[1], "duplicates changed the alerted rate")
 
     def test_one_second_of_jitter_does_not_defeat_duplicate_detection(self):
-        # Real delivery fan-out does not produce identical timestamps, it produces copies a
-        # second or two apart. Exact-pair matching caught only the synthetic case while the
-        # jittered one did identical damage in silence.
+        # Deliveries to several recipients often land a second or two apart, and they are
+        # reported as duplicates as well as exact copies are.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         iso = lambda x: x.isoformat().replace("+00:00", "Z")
@@ -834,10 +811,8 @@ class TestAlertRateCurve(TempCase):
         self.assertNotIn("Repeated alert rows", byod.render_report(c))
 
     def test_sharing_a_bucket_is_not_called_overlapping_in_time(self):
-        # Twelve incident rows 1500 seconds apart were described as overlapping, with half
-        # the window time said to have sat under another window and been absorbed. No two of
-        # them touch. They collide inside an hourly bucket, which is a property of the bucket
-        # size rather than of the file.
+        # Twelve incident rows 1500 seconds apart never touch. They collide inside an hourly
+        # bucket, so they must not be reported as overlapping.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -863,14 +838,9 @@ class TestAlertRateCurve(TempCase):
         self.assertNotIn("sat under another window", report)
 
     def test_the_denominator_does_not_move_with_the_bucket_you_picked(self):
-        # The first version of the merge used the bucket size as its gap tolerance, on the
-        # reasoning that the caller had already chosen that number. That made a count of
-        # incidents depend on a bucket, which is the wrong category: prevalence is a
-        # bucket-level rate and should move with the bucket, and how many incidents there
-        # were is a fact about the world and should not. Twelve rows counted as twelve
-        # stretches at 5m and six at 1h, doubling alerts per incident on bucket size alone.
-        # The sweep computes this once and applies it to every row, so the whole sweep table
-        # moved with the bucket the user passed, which destroys what the sweep is for.
+        # The incident count must not depend on the bucket size. A gap tolerance equal to
+        # the bucket counts these twelve rows as twelve stretches at 5m and six at 1h,
+        # doubling alerts per incident, and the sweep applies one count to every row.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -898,12 +868,10 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(len(inc), 12)
 
     def test_the_denominator_does_not_move_with_how_the_tracker_wrote_its_rows(self):
-        # Row count is a formatting property of an export, not a fact about the world. One
-        # outage is one row to one tracker, one row per affected service to another, and one
-        # row per status update to a third. The same two one-hour incidents written as forty
-        # three-minute rows moved alerts per incident from 355 to 17.75 and flipped the
-        # verdict, with prevalence, alerted rate, recall, precision, F1 and both duty cycles
-        # identical to the last decimal.
+        # Row count depends on the export format. One outage can be one row, one row per
+        # affected service, or one row per status update. The same two one-hour incidents
+        # written as forty three-minute rows must give the same alerts per incident and the
+        # same verdict as two rows.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -938,9 +906,8 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(len(split), 40)
 
     def test_pass_qualified_is_about_a_pass(self):
-        # It was set from the caveats alone with no reference to the verdict, so every
-        # EXCLUDE carried it and anyone reading the JSON instead of the exit code read an
-        # exclusion as a qualified pass.
+        # pass_qualified applies only to a PASS, so an EXCLUDE never reads as a qualified pass
+        # in the JSON.
         excluded = self.abusive(1, rows=2000)
         self.assertEqual(excluded["verdict"], "EXCLUDE")
         self.assertFalse(excluded["pass_qualified"])
@@ -950,15 +917,15 @@ class TestAlertRateCurve(TempCase):
         self.assertTrue(qualified["pass_qualified"])
 
     def test_pass_qualified_sits_next_to_the_verdict(self):
-        # A script branching on the verdict needs the caveat in the same place. It was only
-        # nested under results, so result["pass_qualified"] returned None.
+        # The caveat sits at the top level next to the verdict, where a script branching on
+        # the verdict looks for it.
         r = self.oncall("1h")
         self.assertIn("pass_qualified", r)
         self.assertEqual(r["pass_qualified"], r["results"]["pass_qualified"])
 
     def test_the_volume_notice_gives_an_absolute_rate_and_does_not_call_windows_pages(self):
-        # A ratio alone cannot be compared against a shift, and someone who owns the pager
-        # will read a bucket-level precision as the fraction of useful pages, which it is not.
+        # A ratio alone cannot be compared against a shift, and a bucket-level precision
+        # would read as the fraction of useful pages.
         r = self.abusive(1, rows=600)
         # A PASS at exit 5 rather than an exclusion. The guard does not fire at this rate,
         # so volume is the only thing wrong and the notice is the only thing that says so.
@@ -970,8 +937,7 @@ class TestAlertRateCurve(TempCase):
         self.assertIn("is measured per bucket and is not the fraction of pages", report)
 
     def test_a_volume_close_to_the_limit_says_so(self):
-        # One real production stack landed at 49.47 against a limit of 50, missing it by
-        # about half an alert, and nothing in the report said the call was that close.
+        # A value just under the limit is reported as close to it.
         band = byod.NEAR_BAR_BAND
         self.assertGreater(band, 0)
         r = self.abusive(1, rows=int(6 * byod.ALERTS_PER_INCIDENT_LIMIT * 0.95))
@@ -981,8 +947,7 @@ class TestAlertRateCurve(TempCase):
             self.assertIn("for every incident there was to find", byod.render_report(r))
 
     def test_the_check_table_does_not_say_pass_when_the_guard_stood_down(self):
-        # The prose said "was not applied" while the table one line below said "pass" for the
-        # same check, and a skimmer reads the table.
+        # The table and the prose agree: a suppressed guard reads "not applied" in both.
         report = byod.render_report(self.oncall("1h"))
         row = [l for l in report.splitlines()
                if l.startswith("| Alerted rate against prevalence")]
@@ -993,11 +958,9 @@ class TestAlertRateCurve(TempCase):
     def test_point_events_cannot_buy_their_way_out_of_the_guard(self):
         # The suppression is a way out of an exclusion, so it has to be narrow. It compares
         # the bucketed rate against a duty cycle, and the duty cycle skips zero-length rows.
-        # An export of thousands of point events plus one durational window therefore had a
-        # duty cycle near zero while alerting on 60 percent of the buckets, which suppressed
-        # the guard and passed a detector paging 173 times a day. Above
-        # ZERO_LENGTH_DUTY_LIMIT the duty cycle describes a subset rather than the detector,
-        # so there is nothing to compare against and the guard stands.
+        # An export of thousands of point events plus one durational window has a duty cycle
+        # near zero while alerting on 60 percent of the buckets. Above ZERO_LENGTH_DUTY_LIMIT
+        # the duty cycle describes a subset of the detector, so the guard stands.
         import datetime as _dt
         t0 = _dt.datetime(2026, 3, 1, tzinfo=_dt.timezone.utc)
         end = t0 + _dt.timedelta(days=30)
@@ -1019,7 +982,7 @@ class TestAlertRateCurve(TempCase):
         self.assertEqual(r["verdict"], "EXCLUDE")
 
     def test_the_step_at_the_old_floor_is_gone(self):
-        # 0.499 used to pass and 0.500 used to exclude. Both sides now exclude.
+        # 0.499 and 0.500 both exclude, so there is no step at the old floor.
         for buckets in (719, 720):
             res = self.at_rate(buckets)["results"]
             self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"], buckets)
@@ -1078,11 +1041,10 @@ class TestAlertRateCurve(TempCase):
 
 
 class TestReportedDefects(TempCase):
-    """Four defects reported against v1.3.2 from a real Azure Monitor and Jira export."""
+    """Tool version in the report, two-sided scope overlap and alert concentration."""
 
     def test_the_tool_version_is_in_the_report_and_matches_the_citation_file(self):
-        # A report that names only the specification version cannot be traced back to the
-        # build that made it. The two versions are different things.
+        # The report names the tool version as well as the specification version.
         from fdes import TOOL_VERSION
         cff = (ROOT / "CITATION.cff").read_text()
         declared = [l.split(":", 1)[1].strip() for l in cff.splitlines()
@@ -1093,9 +1055,8 @@ class TestReportedDefects(TempCase):
         self.assertIn(f"otel-aiops-reproduction v{TOOL_VERSION}", byod.render_report(r))
 
     def test_the_scope_overlap_check_looks_at_both_sides(self):
-        # It only ever tested the alert side, while the incident side was computed on the
-        # line above and thrown away. On a real export 74 percent of incidents sat on a
-        # scope no alert covered, a guaranteed false-negative direction, and it said nothing.
+        # Incidents on a scope no alert covers are guaranteed false negatives, so the
+        # incident side is checked as well as the alert side.
         incidents = write(self.tmp, "two_sided_i.csv",
                           "start,end,service\n"
                           "2026-03-01T02:00:00Z,2026-03-01T03:00:00Z,api\n"
@@ -1161,25 +1122,23 @@ class TestReportedDefects(TempCase):
             cwd=ROOT, capture_output=True, text=True)
         # argparse re-wraps help text, so compare on collapsed whitespace.
         flat = " ".join(p.stdout.split())
-        self.assertIn("REPORTS ONLY", flat)
-        self.assertIn("never changes a verdict", flat)
+        self.assertIn("It only reports", flat)
+        self.assertIn("never filters either file or changes a verdict", flat)
 
 
 class TestNoMinimumRecall(TempCase):
-    """A PASS can be carried by precision alone, and that is deliberate but not silent.
+    """A PASS carried by precision alone stands, and the report says so.
 
-    One real run gave four instantaneous alerts over four days. Recall 0.071, F1 0.130,
-    lift 1.85, PASS at exit 0. The detector missed 93 percent of the incident time. There is
-    no recall floor in the procedure, because a high-precision detector that fires rarely is
-    a real thing worth keeping and because bucket-level recall is pushed down by the export
-    format as much as by the detector. So it is reported and not excluded.
+    There is no recall floor in the procedure, because a high-precision detector that fires
+    rarely is worth keeping and because bucket-level recall depends on the export format as
+    much as on the detector. Thin recall is reported, not excluded.
     """
 
     def thin_recall(self, **kwargs):
         """Recall 0.067, precision 0.667, F1 0.121 against a floor of 0.041, so lift 2.97.
 
-        Close to the real numbers, and the same shape. Point events, two of the three
-        landing inside the one 30 minute incident, so 28 of its 30 buckets are missed.
+        Point events, two of the three landing inside the one 30 minute incident, so 28 of
+        its 30 buckets are missed.
         """
         incidents = write(self.tmp, "half_hour.csv",
                           "start,end\n2026-03-01T02:00:00Z,2026-03-01T02:30:00Z\n")
@@ -1256,30 +1215,31 @@ class TestProvenance(TempCase):
             self.assertIn("the result is circular", joined)
             self.assertIn("Where the incident windows came from", joined)
 
-    def test_the_readme_carries_the_long_form(self):
-        readme = (ROOT / "README.md").read_text()
-        self.assertIn("### Where the incident windows came from", readme)
+    def test_the_method_doc_carries_the_long_form(self):
+        # The long form lives in docs/METHOD.md.
+        method = (ROOT / "docs" / "METHOD.md").read_text()
+        self.assertIn("## Where the incident windows came from", method)
         self.assertIn("Ground truth has to come from somewhere the detector cannot reach",
-                      readme)
-        # It sits where the reader is about to build their files, not after the fact.
-        self.assertLess(readme.index("### Where the incident windows came from"),
-                        readme.index("### Getting alert data out of a real vendor"))
-        self.assertGreater(readme.index("### Where the incident windows came from"),
-                           readme.index("### On your own data"))
+                      method)
+        self.assertLess(method.index("## Where the incident windows came from"),
+                        method.index("## Getting alert data out of a real vendor"))
+
+    def test_the_readme_points_at_it_where_the_files_get_built(self):
+        # The README points to it from the section where the reader builds their files.
+        readme = (ROOT / "README.md").read_text()
+        section = readme[readme.index("### On your own data"):readme.index("### Exit codes")]
+        self.assertIn("Ground truth has to come from somewhere the detector cannot reach",
+                      section)
+        self.assertIn("docs/METHOD.md#where-the-incident-windows-came-from", section)
 
 
 class TestAlertedRateRatio(TempCase):
-    """The guard needs two conditions and only one of them ever fired on real data.
+    """A high alerted-rate ratio is reported when the guard does not fire.
 
-    Across two independent datasets, twelve bucket sizes and two ground-truth variants the
-    ratio condition fired every time and the guard never fired once, because the alerted
-    rate topped out at 0.396 and 0.486 against the 0.5 floor. Measured ratios in the second
-    run ran from 11.7 to 14.7. A detector alerting up to fifteen times more often than
-    anything was wrong passed the ratio test several times over and the report said nothing.
-
-    The floor does not move. Two datasets is not enough for that, and the floor is what
-    keeps a rare-incident detector from being condemned for working. The ratio is reported
-    instead, at the guard's own multiple, and the reader judges it.
+    The guard needs both a high ratio and an alerted rate over an absolute floor, so a
+    detector alerting more than ten times as often as anything was wrong can stay under it.
+    The floor keeps a rare-incident detector from being excluded for working, so it stays.
+    The ratio is reported instead, at the guard's own multiple, and the reader judges it.
     """
 
     def high_ratio(self, **kwargs):
@@ -1302,7 +1262,7 @@ class TestAlertedRateRatio(TempCase):
         self.assertAlmostEqual(res["degenerate_output"]["alerted_rate"], 0.15, places=4)
         self.assertAlmostEqual(res["alerted_rate_over_prevalence"], 7.2, places=1)
         self.assertTrue(res["alerted_rate_ratio_high"])
-        # The guard did not fire, and the verdict is what it was before this notice existed.
+        # The guard did not fire, and the notice does not change the verdict.
         self.assertFalse(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertEqual(res["check_status"]["alert_rate_far_above_prevalence"], "pass")
         self.assertEqual(res["exclusion_reasons"], [])
@@ -1379,9 +1339,8 @@ class TestAlertedRateRatio(TempCase):
         res = r["results"]
         self.assertTrue(res["checks"]["alert_rate_far_above_prevalence"])
         self.assertGreater(res["alerted_rate_over_prevalence"], byod.RATIO_NOTICE_MULTIPLE)
-        # The fact is true and the JSON says so. Only the prose is suppressed. These used to
-        # be one field, so a run with an exclusion reported the ratio as not high when it
-        # was, and anything reading the JSON drew the opposite conclusion from the run.
+        # The JSON records the fact. Only the prose is suppressed, through a separate
+        # _notice field.
         self.assertTrue(res["alerted_rate_ratio_high"])
         self.assertFalse(res["alerted_rate_ratio_notice"])
         self.assertNotIn("Alerted far more often", byod.render_report(r))
@@ -1445,9 +1404,9 @@ class TestAlertedRateRatio(TempCase):
 class TestNearTheFloor(TempCase):
     """A lift near 1.0 is a verdict that moves with the bucket size, so the report says so.
 
-    On one real export the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes and the
-    verdict flipped from PASS to EXCLUDE across them. The numbers never left the
-    neighbourhood of the floor. The bucket size is a parameter the user picks.
+    A lift of 1.17, 1.06, 1.05 and 1.02 at four bucket sizes can flip the verdict from PASS
+    to EXCLUDE without leaving the neighbourhood of the floor, and the bucket size is a
+    parameter the user picks.
     """
 
     def near_the_floor(self):
@@ -1506,8 +1465,8 @@ class TestPointEventFallback(TempCase):
 
     A realistic Splunk export carries `_time`, `_indextime`, `earliest` and `latest`. The
     tool takes `_time`, recognises none of the rest as an end, and reads every row as an
-    instant. That choice can decide the verdict on its own, and it used to appear only as
-    one line in the assumption list below the table.
+    instant. That choice can decide the verdict on its own, so it is stated next to the
+    verdict.
     """
 
     SPLUNK = ("_time,_indextime,earliest,latest\n"
@@ -1576,7 +1535,7 @@ class TestSchemaFromTheHeader(TempCase):
         report = byod.render_report(r)
         self.assertNotIn("no end column", report)
         self.assertNotIn("Point events assumed.", report)
-        # A detector that never fired is still a real result.
+        # A detector that never fired is still a result.
         self.assertEqual(r["verdict"], "EXCLUDE")
 
     def test_a_zero_row_file_with_no_end_column_still_says_point_events(self):
@@ -1591,13 +1550,11 @@ class TestSchemaFromTheHeader(TempCase):
 class TestZeroLengthWindows(TempCase):
     """A row that starts and ends at the same second is an instantaneous event.
 
-    Real vendor exports carry them. A Datadog Watchdog story that emitted a single event
-    has one timestamp, so start equals end. An earlier version refused the whole file,
-    which rejected a real export outright, and the only remedy it offered, dropping the
-    end column, would have turned every other row into a point event too.
+    Vendor exports carry them. A Datadog Watchdog story that emitted a single event has one
+    timestamp, so start equals end.
 
-    A row that ends BEFORE it starts is a different thing. That is impossible and means
-    the columns are wrong, so it is still refused.
+    A row that ends before it starts is impossible and means the columns are wrong, so it
+    is refused.
     """
 
     MIXED = ("start,end\n"
@@ -1657,9 +1614,9 @@ class TestAlertNothing(TempCase):
 class TestNullRun(TempCase):
     """A run whose input cannot support a verdict must not report any pass.
 
-    This is the failure the whole procedure exists to criticise, so it gets the most
-    tests. Prevalence zero makes the predict-all floor zero, which used to make F1 minus
-    floor read +0.000 and three guards read pass on a run holding no information.
+    Prevalence zero makes the predict-all floor zero, so F1 minus floor reads +0.000 on a
+    run that holds no information. Every check on such a run reports that it could not be
+    evaluated.
     """
 
     def outside(self):
@@ -1793,13 +1750,12 @@ class TestOverlappingWindows(TempCase):
 
 
 class TestForgottenTickets(TempCase):
-    """Two rows nobody closed owned the whole positive class and the tool said nothing.
+    """Incident rows nobody closed are named, with how far they move prevalence.
 
-    The real export: 23 PagerDuty incidents over 35.6 days, two of them left open for 13
-    and 12 days. Those two held 601 of the 620 incident-hours. Prevalence came out at 0.383
-    instead of 0.020, a 19-fold move, and the verdict turned over. Nobody was in a 13 day
-    outage. The existing assumption text warns that tracker times are imprecise, but that
-    is about minutes of slop at the window edges, not one row spanning a third of the run.
+    23 incidents over 35.6 days, two of them left open for 13 and 12 days and holding
+    almost all of the incident-hours. With them in, prevalence is about 19 times what it is
+    without them. The assumption text about imprecise tracker times covers minutes at the
+    window edges, not one row spanning a third of the run.
     """
 
     def ticket_run(self, incidents_text: str, alerts: str | None = None, **kwargs):
@@ -1811,11 +1767,11 @@ class TestForgottenTickets(TempCase):
         return byod.check_alerts(path, incidents, "5m", **opts)
 
     def forgotten(self):
-        """Two rows left open for 13 and 12 days, overlapping, plus 21 real incidents."""
+        """Two rows left open for 13 and 12 days, overlapping, plus 21 ordinary incidents."""
         return self.ticket_run(ticket_incidents([(2.0, 15.0), (3.5, 15.5)]))
 
     def clean(self):
-        """The same 21 real incidents with the two forgotten rows taken out."""
+        """The same 21 ordinary incidents with the two forgotten rows taken out."""
         return self.ticket_run(ticket_incidents([]))
 
     def test_two_forgotten_rows_are_named_with_their_length_and_share(self):
@@ -1931,12 +1887,11 @@ class TestForgottenTickets(TempCase):
 
 
 class TestBucketSweep(TempCase):
-    """The bucket size chose the verdict, so one bucket's answer is not handed back alone.
+    """The verdict is reported at every bucket size, because the bucket can choose it.
 
-    On the real export the same two files gave EXCLUDE at 1m and 5m and PASS at 15m, 30m,
-    1h and 2h, with the lift climbing monotonically through 0.82, 0.90, 1.05, 1.21, 1.25
-    and 1.28. A coarse bucket lets one short alert cover a whole bucket of incident time
-    for free, so recall rises with the bucket while precision is barely charged for it.
+    A coarse bucket lets one short alert cover a whole bucket of incident time, so recall
+    rises with the bucket while precision barely moves, and the same two files can give
+    EXCLUDE at 1m and 5m and PASS at 15m and above.
     """
 
     def unstable(self, **kwargs):
@@ -1994,10 +1949,8 @@ class TestBucketSweep(TempCase):
         self.assertNotIn("The verdict is not stable", report)
 
     def test_no_sweep_returns_the_single_bucket_verdict_and_says_it_suppressed_one(self):
-        # --no-sweep used to skip the sweep, so a run that would have been UNSTABLE came
-        # back as the single-bucket verdict with nothing said about it. On one real export
-        # the same data and the same bucket gave UNSTABLE at exit 4 with the sweep and PASS
-        # at exit 0 with --no-sweep. The flag holds the verdict. It no longer hides why.
+        # --no-sweep holds the verdict at the chosen bucket, and the sweep still runs so the
+        # report says what it would have been.
         r = self.unstable(sweep=False)
         sweep = r["results"]["bucket_sweep"]
         self.assertEqual(r["verdict"], "EXCLUDE")
@@ -2013,11 +1966,8 @@ class TestBucketSweep(TempCase):
                         report.index("| Check | Section |"))
 
     def test_no_sweep_cannot_turn_a_failing_run_into_a_passing_exit_code(self):
-        # The defect two independent reviewers found in v1.2.0. The flag held the exit code
-        # as well as the verdict, so a continuous integration job reading only the exit code
-        # passed on a run whose verdict was not stable across bucket sizes, and never saw
-        # the paragraph saying so. The flag holds the reported verdict. It does not get to
-        # hold the exit code.
+        # The flag holds the reported verdict but not the exit code, so a job that reads only
+        # the exit code still fails an unstable run.
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             (d / "incidents.csv").write_text(INCIDENTS)
@@ -2066,12 +2016,9 @@ class TestBucketSweep(TempCase):
         self.assertNotIn("bucket_sweep", r["results"])
 
     def test_the_near_floor_notice_defers_to_the_sweep(self):
-        # The near-floor notice used to ask the reader to re-run at other buckets. The
-        # sweep has already done that, so it points at the answer instead of asking again.
-        # The old wording said the disagreement "is why the verdict is UNSTABLE", which
-        # reads as a claim that the floor moved it. On a real export every bucket cleared
-        # the lift and every flip came from the alerted-rate guard, so the sentence now
-        # states the fact and points at the column that names the actual cause.
+        # The sweep has already re-run the other buckets, so the near-floor notice points at
+        # its table and at the column that names which check decided each row. The flips can
+        # come from the alerted-rate guard rather than from the floor.
         report = byod.render_report(self.unstable())
         self.assertIn("so the verdict is UNSTABLE", report)
         self.assertIn("Read the Decided by column", report)
@@ -2089,11 +2036,10 @@ class TestBucketSweep(TempCase):
 
 
 class TestScope(TempCase):
-    """Alerts and incidents can describe different systems and nothing used to notice.
+    """Alerts and incidents can describe different systems, and the report says when.
 
-    One real run scored 156 Watchdog alerts across 34 services against 23 PagerDuty
-    incidents that all came from one service. Most of those alerts could not have matched
-    anything in the incident file, and every one of them was charged as a false positive.
+    An alert on a service that has no incident in the file cannot match anything and is
+    charged as a false positive.
     """
 
     ALERTS = ("start,end,service\n"
@@ -2213,15 +2159,12 @@ class TestScope(TempCase):
 
 
 class TestEmptyScopeIntersection(TempCase):
-    """An empty intersection is usually a naming difference, not a system mismatch.
+    """An empty intersection with one scope on a side is a naming difference.
 
-    The second real run carried 31 scopes from Datadog's `service` tag, which are
-    application names like `app-api` and `app-admin-db`, against exactly 1 scope from
-    PagerDuty's `service` field, which was `Example-Alerts`. That is one catch-all
-    routing destination. Both vendors call the field `service` and they mean different
-    things by it, so the intersection is empty by construction and always will be. The old
-    report called that a possible system mismatch and told the reader to filter both
-    exports to the scopes they share, which leaves an empty file.
+    The alert side carries many application names from Datadog's `service` tag, and the
+    incident side carries one catch-all routing destination from PagerDuty's `service`
+    field. Both call the field `service`, so the intersection is empty by construction.
+    Filtering both exports to the scopes they share would leave an empty file.
     """
 
     # 31 application names on the alert side, one routing destination on the incident side.
@@ -2536,7 +2479,7 @@ class TestColumnOverrides(TempCase):
         self.assertIn("alert_from", msg)
 
     def test_the_incident_override_falls_back_to_the_alert_one(self):
-        # Both files use the same odd names, which is what the old behaviour assumed.
+        # Both files use the same unusual names, so one pair of overrides serves both.
         shared_alerts = write(self.tmp, "shared_alerts.csv",
                               self.ODD_ALERTS.replace("alert_", "w_"))
         shared_incidents = write(self.tmp, "shared_incidents.csv",

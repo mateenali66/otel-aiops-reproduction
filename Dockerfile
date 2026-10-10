@@ -6,7 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     OMP_NUM_THREADS=8 \
-    MKL_NUM_THREADS=8
+    MKL_NUM_THREADS=8 \
+    MPLCONFIGDIR=/tmp/matplotlib
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make ca-certificates \
@@ -27,8 +28,9 @@ COPY examples ./examples
 COPY tests ./tests
 COPY expected ./expected
 
-# data/ (Zenodo download) and out/ (results) are volumes so they survive the container.
-VOLUME ["/work/data", "/work/out"]
+# The Makefile bind-mounts data/ (the Zenodo download) and out/ (results). The image
+# declares no VOLUME, because an anonymous volume at /work/data or /work/out would hide those
+# mounts and discard the results when the container exits.
 
 ENTRYPOINT ["make"]
 CMD ["smoke"]

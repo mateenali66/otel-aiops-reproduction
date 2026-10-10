@@ -85,8 +85,8 @@ def row_labels(report: str) -> list[str]:
 class TestSingleClassFold(unittest.TestCase):
     """A fold with one class carries no information, so it must not report a pass.
 
-    AUC-ROC is undefined there and arrives as nan. `nan <= 0.5` is False, which used to
-    read as a section 8a check that passed on a run holding nothing.
+    AUC-ROC is undefined there and arrives as nan. `nan <= 0.5` is False, which would read
+    as a section 8a check that passed.
     """
 
     def test_a_fold_with_no_anomalies_is_not_a_pass(self):
@@ -209,7 +209,7 @@ class TestAlertRateGuard(unittest.TestCase):
     """
 
     def test_a_detector_flagging_nearly_everything_fires_it(self):
-        # The real export: 94.5 percent of the timeline alerted at a prevalence of 0.043.
+        # 94.5 percent of the timeline alerted at a prevalence of 0.043.
         self.assertTrue(alert_rate_saturated(0.9451, 0.0431))
 
     def test_a_perfect_detector_never_fires_it_at_any_prevalence(self):
@@ -226,23 +226,21 @@ class TestAlertRateGuard(unittest.TestCase):
         self.assertGreater(alert_rate_bar(0.001), 0.01)
 
     def test_the_curve_keeps_the_two_anchors_the_threshold_design_chose(self):
-        # The old shape had absolute floors of 0.20 and 0.50 with kinks at these two
-        # prevalences. The curve is the smooth join of the same two points, so this is an
-        # interpolation of the existing design and not a new opinion about where the bar is.
+        # The curve passes through 0.20 at a prevalence of 0.02 and 0.50 at 0.125, the
+        # anchors of the earlier threshold design.
         self.assertAlmostEqual(alert_rate_bar(0.020), 0.20, places=6)
         self.assertAlmostEqual(alert_rate_bar(0.125), 0.50, places=6)
 
     def test_there_is_no_flat_region_anywhere(self):
-        # This is the defect the two-path shape still had. A constant deciding alone means
-        # the ratio never binds inside that stretch. The bar must move at every prevalence.
+        # Where a constant decides alone the ratio never binds, so the bar must rise at every
+        # prevalence.
         ps = [i / 2000 for i in range(1, 800)]
         bars = [alert_rate_bar(p) for p in ps]
         for p, lo, hi in zip(ps[1:], bars, bars[1:]):
             self.assertGreater(hi, lo, p)
 
     def test_the_ratio_the_bar_allows_falls_as_prevalence_rises(self):
-        # The old shape allowed a ratio of 200 at a prevalence of 0.001, because 0.20 was
-        # an absolute floor and nothing else could reach it.
+        # A fixed floor of 0.20 would allow a ratio of 200 at a prevalence of 0.001.
         self.assertLess(alert_rate_bar(0.001) / 0.001, 50)
         self.assertLess(alert_rate_bar(0.002) / 0.002, 35)
         previous = float("inf")
@@ -252,20 +250,17 @@ class TestAlertRateGuard(unittest.TestCase):
             previous = ratio
 
     def test_the_two_cases_the_old_shape_let_through_now_fire(self):
-        # Both were measured through the command line against the two-path shape.
-        # A hundred times as often as anything was wrong, and it passed.
+        # A hundred times as often as anything was wrong.
         self.assertTrue(alert_rate_saturated(0.1989, 0.002))
-        # And the case where the absolute 0.5 decided alone, with the ratio inert.
+        # A case a fixed 0.5 floor would decide alone, with the ratio inert.
         self.assertTrue(alert_rate_saturated(0.4901, 0.079))
 
     def test_the_case_that_drove_the_first_reshape_still_fires(self):
         # A constructed boundary case, 40 percent alerted at a prevalence of 0.0397.
-        # It is not a measurement from anyone's production data. See the CHANGELOG note
-        # under 1.3.0 for why the earlier description of it was withdrawn.
         self.assertTrue(alert_rate_saturated(0.400, 0.0397))
 
     def test_the_step_function_at_the_old_floor_is_gone(self):
-        # 0.499 passed and 0.500 excluded under the original single condition.
+        # A fixed 0.5 floor would pass 0.499 and exclude 0.500.
         for rate in (0.499, 0.500):
             self.assertTrue(alert_rate_saturated(rate, 0.0397), rate)
 
@@ -282,7 +277,7 @@ class TestAlertRateGuard(unittest.TestCase):
 
 
 class TestRecordedRun(unittest.TestCase):
-    """The run recorded under runs/ is cited as evidence, so it has to stay current."""
+    """The run recorded under runs/ is the documented reference, so it has to stay current."""
 
     def test_the_recorded_pilot_report_has_the_vus_row(self):
         self.assertIn("| Range-based (VUS) | 6 | VUS-PR = ", RECORDED_PILOT.read_text())

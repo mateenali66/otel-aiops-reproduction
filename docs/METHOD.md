@@ -1,21 +1,8 @@
-# How the checks work, and why they are shaped the way they are
+# How the checks work
 
-This is the long half of the documentation. The README tells you how to run the tool. This
-file tells you what each check is doing and, more usefully, what it got wrong before it was
-shaped this way.
-
-Almost every rule below exists because a real export broke an earlier version of it. Four
-production observability stacks were run through the bring-your-own-data path, on Datadog,
-Splunk, Azure Monitor and Cloudflare, and one reviewer spent eight rounds building detectors
-designed to walk through the checks. The `CHANGELOG.md` has the full list with dates. What
-survives here is the reasoning, kept because a check whose justification is not written down
-gets quietly removed by the next person who finds it inconvenient.
-
-The pattern worth knowing before you read any of it: the verdicts held up throughout and the
-explanations did not. Most of what was found was this tool reaching the right answer and
-stating the wrong reason with confidence.
-
----
+The README explains how to run the tool. This file explains what each check in `make check`
+measures, why it is built the way it is, and what it cannot tell you. `CHANGELOG.md` lists
+the changes by version.
 
 ## Where the incident windows came from
 
@@ -24,161 +11,118 @@ from the same place. If your incident windows were built from the alerts you are
 from anything downstream of the detector under test, the result is circular and means
 nothing. It will usually look excellent.
 
-This is easy to do by accident. Deriving incident windows by clustering the detector's own
-alerts gives near-perfect recall and a high lift, because every incident was defined by an
-alert. Grouping tickets opened by the monitoring system under test does the same thing one
-step removed. So does a tracker whose incidents are auto-created from those alerts.
+This happens easily. Incident windows derived by clustering the detector's own alerts give
+near-perfect recall and a high lift, because every incident was defined by an alert. Tickets
+opened by the monitoring system under test, or a tracker that creates incidents from those
+alerts, do the same thing one step removed.
 
 Ground truth has to come from somewhere the detector cannot reach. Human-declared incidents,
-customer-reported outages, postmortems, or a monitoring stack with no shared inputs. If you
-must derive windows from alerts, split by provenance first. Score the detector's alerts only
-against windows built from sources it does not feed.
+customer-reported outages, postmortems and a monitoring stack with no shared inputs all
+qualify. If you
+must derive windows from alerts, split by provenance first and score the detector's alerts
+only against windows built from sources it does not feed.
 
-State where your windows came from when you report a result. A verdict without that is not
-interpretable, whichever way it went.
-
-The tool cannot check any of this, so every report says so in the assumption list. That line
-is the only place many readers will meet it.
+State where your windows came from when you report a result. Without that, a verdict cannot
+be interpreted either way. The tool cannot check provenance, so every report lists it as an
+assumption.
 
 ## Getting alert data out of a real vendor
 
-This is the hardest part of using the tool and it has nothing to do with the tool. The
-export is where the result is won or lost, so what follows is what one real export took.
+The export decides the result more than any check does.
 
-**Datadog Watchdog.** Watchdog is the case that breaks every reasonable assumption.
+Datadog Watchdog needs particular care.
 
-- There is no monitor behind it. Watchdog is not a monitor you can list, and it is not in
-  the Datadog monitor list either, so anything that walks monitors will report that you have
-  no Watchdog data. You do.
-- Its output is Events, not Logs. Searching Logs first returns nothing and reads as a
-  clean negative. It is not one. Go to Events.
-- Use the Events API v2 with `filter[query]=source:watchdog`. That gets you the raw
-  stream.
-- Watchdog emits one event per story update, not one event per window. To get windows,
-  group the events on the `story_key` tag and take the minimum and maximum event timestamp
-  in each group. That gives you a start and an end per story.
-- **Those ends are not resolution times.** The maximum is the last update Watchdog sent,
-  which is usually before the story actually ended and sometimes long before. You invented
-  those end times at export, and this tool will treat them as exact, because a CSV carries
-  no uncertainty. Every false negative charged near the end of a window may be an artefact
-  of that reconstruction.
-- Pagination truncates silently. One run of ours stopped at 6000 events and said nothing
-  about it. The tool only ever sees your CSV, so a short export looks exactly like a quiet
-  week. Page until the cursor is exhausted and count the rows yourself before you trust the
-  file.
-- Check `has_notification` before you measure anything. A Watchdog story that never paged
-  a human is a different object from a monitor that woke somebody at 3am. Measuring the two
-  together answers a question nobody asked. Decide which one you are evaluating and filter
-  to it.
+- Watchdog is not a monitor, so tools that list monitors report no Watchdog data. Its output
+  is Events, not Logs, so searching Logs returns nothing.
+- Use the Events API v2 with `filter[query]=source:watchdog` to get the raw stream.
+- Watchdog emits one event per story update. To get windows, group the events on the
+  `story_key` tag and take the minimum and maximum event timestamp in each group.
+- The maximum is the last update Watchdog sent, which is usually before the story ended.
+  These end times are reconstructed at export, and the tool treats them as exact, so false
+  negatives near the end of a window may come from the reconstruction.
+- Pagination can truncate without warning, and a short export looks the same as a quiet
+  week. Page until the cursor is exhausted and count the rows before you trust the file.
+- Check `has_notification`. A story that never paged anyone is a different thing from a
+  monitor that woke someone up. Decide which you are evaluating and filter to it.
 
-**Incident trackers in general.** A close time in PagerDuty, Jira or ServiceNow is ticket
-hygiene, not impact. It records when somebody clicked resolve. Tickets get closed at the
-end of the shift, on Monday morning, or never. Incident windows built from close times are
-longer than the incident was, sometimes by orders of magnitude, and the tool reads them as
-exact ground truth.
-
-Where you can, build the incident windows from when alerting started and stopped rather
-than from the ticket. That is usually much closer to the truth, it is recoverable from the
-same alerting system you are evaluating (use a different signal from the one under test, or
-the on-call paging record), and it does not depend on anybody remembering to close
-anything. When you cannot, read the forgotten-ticket notice below, because the tool now
-looks for the rows this produces.
+For incident trackers in general, a close time in PagerDuty, Jira or ServiceNow records when
+someone clicked resolve, not when impact stopped. Tickets get closed at the end of a shift,
+on Monday morning, or never, so windows built from close times can be much longer than the
+incident. Where you can, build incident windows from when alerting started and stopped,
+using a different signal from the one under test or the on-call paging record. When you
+cannot, read the next section.
 
 ## Incident rows nobody closed
 
-Two forgotten tickets destroyed one real result. The export held 23 PagerDuty incidents
-over a 35.6 day window. Two of them had been sitting open for 13 days and 12 days and
-accounted for 601 of the 620 total incident-hours. The remaining 21 incidents held 19 hours
-between them. Prevalence came out at 0.383 instead of 0.020, a 19-fold move, and the
-verdict turned over. Nobody was in a 13 day outage. Somebody forgot to close a ticket.
+A few tickets left open can dominate the ground truth. In one export of 23 incidents over
+35.6 days, two tickets open for 13 and 12 days held 601 of the 620 incident-hours. Prevalence
+came out at 0.383 instead of 0.020 and the verdict changed.
 
-The tool said nothing. The assumption text warned that tracker times are imprecise, but
-that warning is about minutes of slop at the window edges, not about one row spanning a
-third of the observation window. Every incident tracker on earth has forgotten-open
-tickets, so this hits almost everyone who runs the tool.
+An incident row is flagged as implausibly long when both of these hold.
 
-An incident row is now called implausibly long when **both** of these hold.
+1. It covers at least 10 percent of the observation range.
+2. It runs at least 10 times the median incident in the same file.
 
-1. It covers at least 10 percent of the observation range. A window spanning a tenth of
-   everything you watched is not an incident, it is a state.
-2. It runs at least 10 times the median incident in the same file. It has to be an outlier
-   against its own population, not just large.
+Each condition protects a case the other gets wrong. Without the range condition, ordinary
+spread is flagged. Where the median row is ten seconds, a five-minute blip is 30 times the median and
+normal. Without the median condition, a real outage in a short observation window is flagged. Four
+hours of a single day is 17 percent of the range. The guard needs at least three rows in
+range to compute a median.
 
-Both conditions are needed and each one protects a case the other gets wrong. Without the
-first, ordinary spread is condemned: in a file where the median row is ten seconds, a five
-minute blip is 30 times the median and perfectly normal. Without the second, a real outage
-in a short observation window is condemned: four hours of a single day is 17 percent of the
-range and there is nothing wrong with it. The guard also needs at least three rows in
-range, because a median of one or two rows is not a median.
+When it fires, the report says so next to the verdict. It gives the number of rows, their
+length, their share of the observation range, their multiple of the median, their share of
+all incident time, and what prevalence would be without them.
 
-When it fires, the report says so next to the verdict, names how many rows, how long they
-are, what share of the observation range and what multiple of the median that is, and what
-share of all incident time they own. It says plainly that a small number of rows own most
-of the positive class and that prevalence, the floor and the verdict rest on them. It also
-prints what prevalence would have been without them, so the size of the effect is on the
-page rather than left as an exercise.
+No row is dropped. Deciding which rows are real is up to you. The rows are listed in
+`check_result.json` under `incident_concentration` with their start, end, length and shares,
+so you can look them up in the tracker.
 
-**Nothing is dropped.** Which rows are real is your call and the tool does not get to make
-it. The rows are listed in `check_result.json` under `incident_concentration`, with their
-start, end, length, share of range and share of incident time, so you can go and look them
-up in the tracker.
-
-The general form of the same problem is reported too, whether or not any single row looks
-broken. When the longest tenth of the incident rows owns half or more of all incident time,
-the report says the ground truth is lopsided and names the share. A file like that is not
-necessarily wrong, and correcting one or two end times would still move the result.
+The report also flags a lopsided file whether or not any single row looks broken. When the
+longest tenth of the incident rows owns half or more of all incident time, the report names
+the share, because correcting one or two end times would move the result.
 `LONG_INCIDENT_RANGE_SHARE`, `LONG_INCIDENT_MEDIAN_MULTIPLE` and `CONCENTRATION_NOTICE` in
-`fdes/byod.py` set the three thresholds.
+`fdes/byod.py` set the thresholds.
 
 ## The bucket size chooses the verdict
 
-On the same real export the verdict was `EXCLUDE` at 1m and 5m and `PASS` at 15m, 30m, 1h
-and 2h. The lift climbed monotonically: 0.82, 0.90, 1.05, 1.21, 1.25, 1.28. The detector
-never changed. The cause is mechanical. A coarse bucket lets one short alert cover an
-entire incident bucket for free, so recall rises with the bucket size while precision is
-barely charged for it. The operator picks the bucket, and by picking the bucket they pick
-the answer.
+The same detector can get different verdicts at different bucket sizes. In one example the
+verdict was `EXCLUDE` at 1m and 5m and `PASS` at 15m, 30m, 1h and 2h, with the lift rising
+at every step (0.82, 0.90, 1.05, 1.21, 1.25, 1.28). A coarse bucket lets one short alert
+cover a whole incident bucket, so recall rises with the bucket size while precision barely
+falls.
 
-So alerts mode does not hand back one bucket's answer as if it were settled. It runs the
-whole check at 1m, 5m, 15m and 1h, plus whatever `--bucket` you passed, and reports the
-verdict at every one of them.
+Alerts mode therefore runs the check at 1m, 5m, 15m and 1h, plus the `--bucket` you passed,
+and reports the verdict at each.
 
-- When every bucket agrees, the verdict stands and the report says the sweep was run and
-  what it found, so a reader knows the question was asked. The table sits under the checks.
+- When every bucket agrees, the verdict stands and the sweep table appears under the checks.
 - When they disagree, the verdict is `UNSTABLE`, exit code 4. The report leads with the
-  table of verdicts, says which buckets gave which answer, and says that the single-bucket
-  numbers printed below it are reported for the record and are not the answer. When the
-  lift rises at every step of the ladder, it names that as the signature of the mechanism
-  above rather than of a detector that works at one time scale.
+  table of verdicts and says that the single-bucket numbers below it are for the record.
+  When the lift rises at every step, it names the coarse-bucket effect above as the likely
+  cause.
 
-`UNSTABLE` is not a softer `EXCLUDE`. It says this input cannot settle the question on its
-own. To settle it, pick the bucket size from the time scale your responders actually work
-at and be able to say why you picked it, or treat the result as undecided. Only rows that
-gave `PASS` or `EXCLUDE` are compared. A bucket size that comes out `INSUFFICIENT` is
-listed and left out of the comparison, because it says there was nothing to measure there,
-not that the answer flipped.
+`UNSTABLE` means this input cannot settle the question. Pick the bucket size from the time
+scale your responders work at and be able to say why, or treat the result as undecided. Only
+`PASS` and `EXCLUDE` rows are compared. A bucket size that comes out `INSUFFICIENT` is listed
+and left out of the comparison.
 
-`--no-sweep` holds the reported verdict at the bucket you passed. It does not give you that
-bucket's exit code back. A suppressed `UNSTABLE` still exits 4, because a flag that chooses
-which verdict is printed must not also decide whether a script sees a failure.
-`sweep_suppressed_unstable` in `check_result.json` tells the two apart.
-The sweep is four extra runs of arithmetic on the same arrays, so it costs nothing worth
-saving. `SWEEP_BUCKETS` in `fdes/byod.py` sets the ladder. The sweep is alerts mode only:
-in scores mode the operating point moves with the bucket as well as the bucket boundaries,
-so a sweep there would change two things at once and answer neither.
+`--no-sweep` holds the reported verdict at the bucket you passed, but a suppressed `UNSTABLE`
+still exits 4, so a flag that changes what is printed cannot also hide a failure from a
+script. `sweep_suppressed_unstable` in `check_result.json` tells the two apart.
+`SWEEP_BUCKETS` in `fdes/byod.py` sets the ladder. The sweep runs in alerts mode only,
+because in scores mode the operating point moves with the bucket as well as the bucket
+boundaries.
 
 ## Scope, when the two files describe different systems
 
-Watchdog covered 34 services in that same run. All 23 PagerDuty incidents came from a
-single service. So most of the 156 alerts could not possibly have corresponded to any
-incident in the file, and every one of them was scored as a false positive. The CSVs carry
-no notion of scope, so nothing noticed, and precision, F1 and the verdict were all
-measuring the mismatch rather than the detector.
+If the alert export covers 34 services and every incident comes from one service, most
+alerts cannot match any incident and all of them are scored as false positives. A CSV
+carries no notion of scope, so precision, F1 and the verdict would measure the mismatch
+rather than the detector.
 
-Both window CSVs can now carry an optional service or scope column. `service`,
-`service_name`, `scope`, `entity` and `component` are recognised by name, and `--scope-col`
-and `--incident-scope-col` name anything else. `--incident-scope-col` falls back to
-`--scope-col`, the same as the start and end overrides.
+Both window CSVs can carry an optional service or scope column. `service`, `service_name`,
+`scope`, `entity` and `component` are recognised by name, and `--scope-col` and
+`--incident-scope-col` name any other column. `--incident-scope-col` falls back to
+`--scope-col`.
 
 ```bash
 python bin/reproduce.py check \
@@ -189,107 +133,62 @@ python bin/reproduce.py check \
 ```
 
 When both files have one, the report gives the number of distinct scopes on each side, how
-many they share, and what share of the alert rows fall on scopes that appear in no
-incident. When at least half of the alert rows fall on unmatched scopes, the report says
-next to the verdict that the two files may be describing different systems and that the
-result is unreliable until they cover the same scope.
+many they share, and the share of alert rows on scopes that appear in no incident. When half
+or more of the alert rows are on unmatched scopes, the report says next to the verdict that
+the files may describe different systems.
 
-Scope strings are compared for equality, so two exports naming the same service differently
-(`checkout` against `checkout-api`, or a Datadog tag against a PagerDuty service name) read
-as no overlap at all. Normalise the names in the CSVs before you trust the share.
+Scope strings are compared for equality, so `checkout` and `checkout-api` count as no
+overlap. Normalise the names in the CSVs first.
 
-**An empty intersection is usually a naming difference.** A second real run carried 31
-scopes from Datadog's `service` tag, which are application names like `app-api` and
-`app-admin-db`, against exactly 1 scope from PagerDuty's `service` field, which was
-`Example-Alerts`. That is one catch-all routing destination, and a single catch-all
-PagerDuty service is the normal setup. Both vendors legitimately call the field `service`
-and they mean different things by it. Datadog means the application the signal came from.
-PagerDuty means where the page was sent. The intersection is empty by construction and it
-always will be.
+An empty intersection is often a naming difference. Datadog's `service` tag names the
+application a signal came from. PagerDuty's `service` field names where the page was sent,
+and many teams route every page to one catch-all service. Both vendors call the field
+`service`, so the intersection is empty by construction and the unmatched share reads 100
+percent whatever the detector did. When the intersection is empty and one side has exactly
+one distinct scope, the report says the files use two naming schemes. It does not suggest
+filtering both files to the shared scopes, which would leave them empty, and it suggests
+taking the incident scope from the alert payload the incident was created from or from the
+incident title.
 
-Two things follow, and the report used to get both of them wrong. The unmatched share reads
-100 percent whatever the detector did, so it is not evidence of a system mismatch. And the
-remedy for a poor overlap, filtering both exports to the scopes they share, leaves an empty
-file. So when the intersection is empty and one side carries exactly one distinct scope, the
-report says the two files are using two naming schemes rather than describing two systems,
-withholds the filter remedy, and points at taking the incident scope from the alert payload
-the incident was created from or from the incident title.
-
-The threshold is one distinct scope, not a ratio. One value cannot be a partial list of
-application names, so the reading is unambiguous. Two or three names against thirty is
-suggestive of the same thing and it is not unambiguous, because two exports really can cover
-two small estates that do not overlap. Those keep the mismatch reading. They lose only the
-filter remedy, which cannot be followed on an empty intersection either way. A genuine
-partial overlap, where at least one name appears on both sides, is untouched and still gets
-the original wording and the original remedy. `SCOPE_NAMESPACE_MAX_SCOPES` in `fdes/byod.py`
-sets the threshold, and `check_result.json` carries `empty_intersection`,
+The threshold is one distinct scope, because one value cannot be a partial list of
+application names. Two or three names against thirty may be the same situation, but two
+exports can also cover two small estates that do not overlap, so those keep the mismatch
+reading without the filter suggestion. A partial overlap, where at least one name appears on
+both sides, gets the original wording and the filter suggestion. `SCOPE_NAMESPACE_MAX_SCOPES`
+in `fdes/byod.py` sets the threshold, and `check_result.json` carries `empty_intersection`,
 `namespace_mismatch`, `single_scope_side` and `single_scope_name` under `results.scope`.
 
-**Scope is reported and never applied.** No row is filtered by it and no number moves
-because of it, so the same two files give the same verdict with the column and without it.
-Filtering both exports to the scopes they share is a decision about what you are measuring,
-and it belongs to you.
+Scope is reported, never applied. No row is filtered and no number moves, so the same two
+files give the same verdict with the column and without it.
 
-When the columns are absent, the run behaves exactly as it did before, and the report says
-in the assumption list that scope was not checked and what that risks: every alert is
-scored against every incident whatever system it came from, alerts on services with no
-incident in the file are counted as false positives and could not have been anything else,
-and nothing in the numbers shows it. Scores mode always says this, because a score series
-has one row per timestamp and no scope column to compare with.
+When the columns are absent, the assumption list says scope was not checked and that alerts
+on services with no incident in the file are counted as false positives. Scores mode always
+says this, because a score series has one row per timestamp and no scope column.
 
 ## The alerted rate against prevalence
 
-A detector that alerts on nearly all of the time is the failure this whole tool exists to
-catch, and the F1 form of section 8b lets some of them through. That form asks whether F1
-sits within 5 percent of the predict-all floor with recall at or above 0.95. Both numbers
-are computed from the same prevalence, so the margin is narrow and a detector can miss it
-by a rounding-level distance.
+The F1 form of section 8b asks whether F1 sits within 5 percent of the predict-all floor
+with recall at or above 0.95. Both numbers come from the same prevalence, so a detector that
+alerts almost all the time can miss the margin by a rounding-level distance. For example, at
+prevalence 0.043, recall 1.00, precision 0.045 and an alerted rate of 0.945, F1 is 0.087
+against a floor of 0.082. That is 5.6 percent above the floor, just outside the margin, so
+section 8b does not fire although the detector alerted on 94.5 percent of the week.
 
-One real Splunk and PagerDuty export did exactly that. Prevalence 0.043, recall 1.00,
-precision 0.045, alerted rate 0.945, F1 0.087 against a floor of 0.082. F1 sits 5.6 percent
-above the floor, which is outside a 5 percent margin by six tenths of a percentage point,
-so section 8b did not fire and the verdict was `PASS`. The detector had alerted on 94.5
-percent of the week. At a 15 minute bucket the same detector alerted 95.4 percent of the
-time and was correctly excluded, so the verdict turned on the bucket size.
+A working detector alerts about as often as things are anomalous, so its alerted rate sits
+near prevalence. A detector that flags everything alerts far more often. The guard fires when
+the alerted rate squared reaches twice prevalence. Since the alerted rate divided by
+prevalence equals recall divided by precision, this is the same as the alerted rate times
+its ratio to prevalence reaching 2. A detector may alert often, or alert far more often than
+incidents occur, but not both. `ALERT_RATE_PRODUCT` in `fdes/checks.py` sets the 2, and
+`alert_rate_bar` solves the rule for the rate so the report can print the bar.
 
-The alerted rate against prevalence separates the two cases cleanly. A detector that works
-alerts about as often as things are actually anomalous, so its alerted rate sits near
-prevalence. A detector that flags everything alerts far more often than anything is wrong.
-
-The rule is one line. **The guard fires when the alerted rate squared reaches twice
-prevalence.** Since the alerted rate divided by prevalence is recall divided by precision,
-that is the same as saying the alerted rate multiplied by its ratio to prevalence reaches 2.
-You may alert often, or you may alert far more often than incidents occur. You may not do
-both. `ALERT_RATE_PRODUCT` in `fdes/checks.py` sets the 2, and `alert_rate_bar` solves the
-rule for the rate so a report can print the bar a detector had to stay under.
-
-**Why a curve and not a threshold.** This started as one condition, then two, and both
-shapes had the same defect. A threshold that is constant in prevalence has a flat region,
-and inside that region the constant decides alone while the ratio never binds. The first
-shape was flat below a prevalence of 0.125, because four times 0.125 is 0.5, and real
-incident data almost never sits above 0.125. The two-path shape that replaced it narrowed
-the flat regions rather than removing them, and two of them survived:
-
-| prevalence | the bar under the two-path shape | ratio it allowed |
-|---|---|---|
-| at or below 0.02 | 0.20, an absolute floor | up to 200 |
-| 0.02 to 0.05 | ten times prevalence | 10 |
-| 0.05 to 0.125 | 0.50, an absolute floor | 4 to 10 |
-| above 0.125 | four times prevalence | 4 |
-
-At a prevalence of 0.002 a detector alerting on 19.89 percent of the timeline passed and one
-alerting on 20.09 percent was excluded, and both were alerting about a hundred times more
-often than anything was wrong. The 0.20 decided it and the ratio was irrelevant. The 0.05 to
-0.125 stretch is worse, because that is ordinary prevalence rather than a corner.
-
-Flat regions also make bucket sweeps read as unstable for a reason that has nothing to do
-with the detector. At a kink, a rounding-level move in prevalence can carry the threshold
-past a fixed alerted rate, so the same detector flips verdict between two bucket sizes.
-
-The curve keeps the two anchors the threshold design had already chosen and joins them
-instead of stepping between them. At a prevalence of 0.02 the bar is 0.20 and at 0.125 it is
-0.50, exactly where the old floors sat. Everywhere else it interpolates, so the ratio always
-binds and the bar always moves with prevalence.
+The rule is a curve because a threshold that is constant in prevalence has flat regions
+where the constant decides alone and the ratio never binds. With an absolute floor of 0.20,
+at prevalence 0.002 a detector alerting on 19.89 percent of the timeline passes and one at
+20.09 percent is excluded, although both alert about a hundred times more often than anything
+is wrong. Flat regions also make a bucket sweep look unstable, because a small move in
+prevalence can carry the threshold past a fixed alerted rate. The curve passes through 0.20
+at prevalence 0.02 and 0.50 at 0.125 and moves with prevalence everywhere.
 
 | prevalence | the bar | ratio it allows |
 |---|---|---|
@@ -300,213 +199,161 @@ binds and the bar always moves with prevalence.
 | 0.125 | 0.500 | 4 |
 | 0.300 | 0.775 | 2.6 |
 
-**A perfect detector cannot be caught, and this is now provable rather than tested.** A
-perfect detector has an alerted rate equal to prevalence, so it fires only when prevalence
-squared reaches twice prevalence, meaning a prevalence of 2. That cannot happen. This
-matters, because the one-sided version of section 8b this package used to ship excluded any
-detector with recall at or above 0.95 whatever its F1, which wrongly excluded a detector
-scoring F1 1.0 at recall 1.0. The two-sided margin fixed that and opened the hole above.
-Reading the alerted rate closes the hole without reopening the original defect.
+A perfect detector cannot trigger the guard. Its alerted rate equals prevalence p, so it
+would need p squared to reach 2p, which means p of 2. Rare incidents are still covered: at a
+prevalence of 0.001 the bar is 0.045, so a detector alerting on 1 percent of the time with
+perfect recall, ten times prevalence, passes.
 
-**Rare incidents are still protected.** At a prevalence of 0.001 the bar is 0.045, so a
-detector alerting on 1 percent of the time with perfect recall is ten times prevalence and
-well clear of it. What the curve no longer permits is a ratio of two hundred.
+At full recall the guard fires below a precision of the square root of half the prevalence.
+For every prevalence under 0.5 that is above prevalence itself, the precision that flagging
+everything achieves.
 
-**The alerted rate is bucket occupancy, and the guard knows the difference.** A window
-shorter than the bucket claims the whole bucket, so at a coarse bucket a detector that
-alerts briefly and often reads exactly like one that alerts continuously. A detector
-catching six one-hour incidents in full, plus six one-minute false alarms a day, is in an
-alerting state 1.25 percent of the time against a prevalence of 0.83 percent, so it alerts
-1.5 times as often as anything is wrong. At an hourly bucket every one-minute alarm claims a
-whole bucket, the alerted rate reads 0.25, and the guard excluded it while stating that it
-alerted 30 times as often as anything was wrong. That sentence was false and it was the most
-confident sentence in the report.
+### Bucket occupancy
 
-So before the guard excludes, the same rule is applied to the raw alert and incident
-durations, which no bucket has touched. If it does not fire there, the exclusion belongs to
-the bucket size you picked rather than to the detector, and it is not applied. The report
-says so, gives the duty cycle and the true ratio, and points you at a bucket close to your
-shortest alert. It also gives the alert count and the precision, because how many times a
-detector pages is a different question from how much time it occupies, and the guard settles
-neither. This applies in alerts mode only, since scores mode has no durations to read.
+The alerted rate is measured in buckets, and a window shorter than the bucket claims the
+whole bucket. At a coarse bucket a detector that alerts briefly and often looks like one that
+alerts continuously. Take a detector that catches six one-hour incidents in full and raises
+six one-minute false alarms a day. It is in an alerting state 1.25 percent of the time
+against a prevalence of 0.83 percent, so it alerts 1.5 times as often as anything is wrong.
+At an hourly bucket every one-minute alarm claims a whole bucket and the alerted rate reads
+0.25.
 
-**The bar stays stricter than the baseline it exists to catch.** At full recall the guard
-fires below a precision of the square root of half the prevalence, and that sits above
-prevalence, which is the precision flagging everything achieves, for every prevalence under
-0.5.
+Before the guard excludes, the same rule is applied to the raw alert and incident durations.
+If it does not fire there, the exclusion comes from the bucket size and is not applied. The
+report says so, gives the duty cycle and the true ratio, suggests a bucket close to your
+shortest alert, and gives the alert count and the precision. This applies in alerts mode
+only, since scores mode has no durations.
 
-**When it fires on a detector that works.** This is the check most likely to catch a real
-detector that finds incidents and simply costs too much to page on. A detector at a
-prevalence of 0.02 alerting on 20 percent of the timeline with recall 1.000 scores 4.64
-times the predict-all floor and is still excluded. That is the intended judgement, but a
-bare `EXCLUDE` plus a sentence about alert volume reads as "this does not detect anything",
-which is the opposite of what happened. So when the guard fires while the detector has lift
-over the floor or high recall, the exclusion says so in words: excluded on alert volume, not
-on failing to detect, with the lift and the recall named, and the trade handed back to the
-reader as a judgement about their own on-call load.
+`SUPPRESSION_MAX_LEVERAGE` limits how much of the alerted rate may be blamed on the bucket.
+The quantity it caps is roughly the bucket length divided by the window length, so it only
+asks whether the windows are very short relative to the bucket. It stops suppression on degenerate
+exports and is not an independent check.
 
-The guard applies in both modes, and in scores mode it applies at whatever operating point
-the threshold produces, so a score that ranks buckets well still cannot reach `PASS` while
-its operating point flags most of the timeline.
+### When it fires on a detector that works
 
-**Alert volume, and what still is not measured.** Nothing in the checks above reads how
-often a detector pages. The guard reads how much of the timeline it occupies, and a detector
-that fires constantly in short bursts occupies very little of it, so a run can clear every
-check here while paging more often than anyone would read. The report gives the alerts per
-incident, the alerts per day, the window count and the incident stretch count, and says
-plainly that it is not deciding for you.
+The guard can exclude a detector that finds incidents but costs too much to page on. At
+prevalence 0.02, a detector alerting on 20 percent of the timeline with recall 1.000 scores
+4.64 times the predict-all floor and is excluded. When the guard fires while the detector
+has lift over the floor or high recall, the report says it was excluded on alert volume, not
+for failing to detect, names the lift and the recall, and leaves the trade-off to you.
 
-Two limits on that, both raised by people who own pagers. An alert window is not a page,
-because real stacks deduplicate and group, and the export does not say which it is. And the
-precision reported in the check table is measured per bucket, so it is not the fraction of
-pages that were worth reading.
+The guard applies in both modes. In scores mode it applies at whatever operating point the
+threshold produces, so a score that ranks buckets well cannot reach `PASS` while its operating
+point flags most of the timeline.
 
-`ALERTS_PER_INCIDENT_LIMIT` is 50 and it is a weaker number than the guard curve. The known
-reference points are one detector at 31 that is worth keeping and two at 176 and 355 that are
-not, plus one real production stack at 49.47, which misses the limit by about half an alert.
-A run inside 10 percent of the limit says so. The denominator counts merged incident
-stretches rather than rows, because row count is a formatting property of an export: the same
-two outages written as forty rows instead of two used to move the ratio from 355 to 17.75 and
-flip the verdict with every other number identical.
+### Alert volume
 
-**This check does not reach scores mode.** There are no discrete alert windows in a score
-series, so there is nothing to count. Threshold up-crossings would give an equivalent and
-they are not implemented. A scores-mode `PASS` therefore rests on fewer checks than an
-alerts-mode one, in this respect as well as in section 8a.
+The guard measures how much of the timeline a detector occupies, not how often it pages. A
+detector that fires constantly in short bursts occupies little time, so it can clear every
+check while paging more often than anyone would read. The report therefore gives the alerts
+per incident, the alerts per day, the window count and the incident stretch count, and does
+not make the judgement for you.
 
-**On the leverage cap.** `SUPPRESSION_MAX_LEVERAGE` is not an independent gate and should not
-be read as one. Leverage is roughly the bucket divided by the window, so it only answers
-whether the windows are very short relative to this bucket, and it is denominated in the same
-quantisation it is meant to police. It caught two degenerate exports at 300 and 370 and has
-never bound on anything else. It is a floor against nonsense exports and nothing more.
+An alert window is not a page, because real stacks deduplicate and group alerts and the
+export does not say which happened. The precision in the check table is measured per bucket,
+so it is not the fraction of pages worth reading.
 
-**Known limit, and where the evidence actually sits.** Two production observability
-exports have been run through this, one on Datadog and one on Splunk. On the Datadog export
-the alerted rate ran 0.292 to 0.396 across four bucket sizes and two ground-truth variants,
-with the ratio to prevalence running 11.7 to 14.8 once two multi-day stale incident rows
-were removed. Every one of those now excludes on the curve, where several of them passed
-under the earlier shapes. On the Splunk export the top rate was 0.945 and it excluded under
-every shape.
+`ALERTS_PER_INCIDENT_LIMIT` is 50. Known reference points are one detector at 31 worth
+keeping, two at 176 and 355 that are not, and one production stack at 49.47. A run within 10
+percent of the limit says so. The denominator counts merged incident stretches rather than
+rows, because the same two outages written as forty rows instead of two would otherwise move
+the ratio from 355 to 17.75.
 
-Two datasets is not enough to move the constant again. It is enough to say where the bar
-sits relative to the only real measurements there are, which is below all of them. The
-report prints the ratio next to the verdict whenever it reaches four times prevalence and
-the guard did not fire, so the number that carries the information is visible even when
-nothing acts on it.
+This check is not available in scores mode, because a score series has no discrete alert
+windows to count. A scores-mode `PASS` therefore rests on fewer checks than an alerts-mode
+one, in this respect as well as in section 8a.
 
-## When prevalence is above a half, and nothing can fail
+The constant 2 has been checked against only a few real exports. The report prints the ratio
+to prevalence next to the verdict whenever it reaches four times prevalence and the guard did
+not fire.
 
-The guard's bar is the square root of twice prevalence. Above a prevalence of 0.5 that bar
-exceeds 1.0, and an alerted rate cannot exceed 1.0, so the guard is structurally incapable of
-firing. The docstring proved the safe direction, that a perfect detector can never be caught,
-and for a while nobody wrote down the dual. A real Cloudflare export at a prevalence of 0.853
-printed a bar of 1.306 next to the word `pass`, for a check that could not have failed, while
-a detector alerting on 61.5 percent of the timeline walked through it. The check table now
-says `not reachable at this prevalence`.
+## When prevalence is above a half
 
-The deeper problem is that nothing else can fail there either. Section 8b needs recall at or
-above 0.95. Alerts mode has no rank metric, so section 8a cannot fire. And the predict-all
-floor reaches 0.92 at that prevalence, so F1 barely separates a working detector from one that
-alerts on everything. A detector alerting on 88 percent of the timeline came back `PASS` at
-exit 0 with not one check firing.
+The guard's bar is the square root of twice prevalence. Above a prevalence of 0.5 the bar
+exceeds 1.0, and an alerted rate cannot exceed 1.0, so the guard cannot fire. At a
+prevalence of 0.853 the bar is 1.306, and the check table says `not reachable at this
+prevalence`.
 
-That is not a detector that passed. It is an input that cannot produce a verdict, and it is
-reported as `INSUFFICIENT`. Two conditions are needed, because prevalence alone was too blunt:
-a perfect detector at a prevalence of 0.6 scores a third above the floor, which is a real
-measurement, and it keeps its `PASS`. The verdict is withheld only when the guard is
-unreachable and the detector also sits inside the near-floor band. An `EXCLUDE` still stands
-either way, because a check firing is evidence.
+Nothing else can fail there either. Section 8b needs recall at or above 0.95, alerts mode
+has no rank metric for section 8a, and the predict-all floor reaches 0.92, so F1 barely
+separates a working detector from one that alerts on everything. A detector alerting on 88
+percent of the timeline would pass with no check firing.
 
-A prevalence above a half also gets its own notice at the top of the report. It means most of
-the observation window was inside an incident, which is occasionally true on a range chosen
-around a long outage and much more often means the incident file is describing ticket lifetime
-rather than incident time.
+Such a run is `INSUFFICIENT` when the guard is unreachable and the detector also sits inside
+the near-floor band. Prevalence alone is not enough: a perfect detector at a prevalence of
+0.6 scores a third above the floor, which is a real measurement, and keeps its `PASS`. An
+`EXCLUDE` still stands either way.
+
+A prevalence above a half also gets a notice at the top of the report. It means most of the
+observation window was inside an incident, which can be true on a range chosen around a long
+outage but more often means the incident file records ticket lifetime rather than incident
+time.
 
 ## Duplicate alert rows, and why the tool counts them anyway
 
-One real export delivered every notification to four email recipients. Each alert appeared
-four times, with a distinct row identifier and an identical timestamp. That multiplied the
-alerts per incident by four and made the overlap notice describe a distribution list as if it
-were a temporal property of the detector.
+An export that sends each notification to several recipients repeats each alert, with a
+distinct row identifier and the same or nearly the same timestamp. That multiplies the
+alerts per incident and makes the overlap notice describe a distribution list as if it were
+the detector's behaviour. The alerted rate is not affected, because occupancy is a union and
+duplicate windows claim buckets that are already claimed.
 
-The alerted rate is not affected, and the first version of this notice said it was. Occupancy
-is a union, so duplicate windows claim buckets that were already claimed, and the rate is
-identical at every multiplicity.
+Exact duplicates are easy to match, but real delivery fan-out produces copies a second or two
+apart. The check therefore also compares the row count with the number of separate stretches
+the rows cover, since repeated deliveries of one alert collapse into one stretch however they
+are jittered.
 
-Exact-pair matching caught that case and nothing else. Real delivery fan-out does not produce
-four identical timestamps, it produces four deliveries a second or two apart, and one second
-of jitter defeated the check entirely while doing identical damage. So the check also compares
-the row count against the number of separate stretches those rows cover, since repeated
-deliveries of one alert collapse into one stretch however they are jittered.
-
-That second signal cannot distinguish a fan-out from a genuinely bursty detector. Three real
-firings a minute apart, each five minutes long, produce exactly the same shape as one alert
-delivered three times. Both read three rows per stretch. The report says so rather than
-guessing, and it is a notice rather than a verdict, so nothing is decided on it.
+That second signal cannot tell fan-out from a bursty detector. Three real firings a minute
+apart, each five minutes long, have the same shape as one alert delivered three times. The
+report says so, and the finding is a notice, not a verdict.
 
 ## There is no minimum recall
 
-Nothing in this procedure sets a floor on recall, and a `PASS` can be carried by lift alone.
-One real run gave four instantaneous alerts over four days. Recall 0.071, F1 0.130, lift
-1.85, `PASS` at exit 0. The detector missed 93 percent of the incident time.
+Nothing in this procedure sets a floor on recall, and lift alone can carry a `PASS`. For
+example, four instantaneous alerts over four days gave recall 0.071, F1 0.130, lift 1.85 and
+`PASS` at exit 0, while missing 93 percent of the incident time.
 
-That is deliberate. A high-precision detector that fires rarely and is usually right is a
-real thing worth keeping, and excluding it would be wrong. Bucket-level recall is also
-pushed down by the export format as much as by the detector. A file of instantaneous alerts
-cannot reach high bucket recall whatever the detector did, because one alert covers one
-bucket while an incident covers many. A recall floor would mostly be measuring the export.
+A high-precision detector that fires rarely and is usually right is worth keeping. Bucket
+recall also depends on the export format. Instantaneous alerts cover one bucket each while an
+incident covers many, so a recall floor would mostly measure the export.
 
-It is not left silent. When the verdict is a `PASS` and recall is under 0.5, the detector
-missed more incident time than it caught, and the report says so next to the verdict along
-with the precision and the floor that carried the verdict instead. `LOW_RECALL_NOTICE` in
-`fdes/byod.py` sets the band, and `check_result.json` carries it as `low_recall`. If you
-needed a detector to catch incidents rather than to confirm them, read that line before you
-read the verdict.
+When the verdict is `PASS` and recall is under 0.5, the report says next to the verdict that
+the detector missed more incident time than it caught, and gives the precision and the floor
+that carried the verdict. `LOW_RECALL_NOTICE` in `fdes/byod.py` sets the band, and
+`check_result.json` carries it as `low_recall`.
 
 ## When the lift sits near the floor
 
-The lift is F1 divided by the predict-all floor, and a lift near 1.0 means the detector
-scores about what flagging every bucket would score. A verdict there turns on a
-rounding-level difference, and the bucket size is a parameter you picked. On the export
-above the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes. It never left the
-neighbourhood of 1.0, and the verdict still flipped between `PASS` and `EXCLUDE` across
-them.
+The lift is F1 divided by the predict-all floor. A lift near 1.0 means the detector scores
+about what flagging every bucket would score, so the verdict turns on a rounding-level
+difference. In one example the lift was 1.17, 1.06, 1.05 and 1.02 at four bucket sizes and
+the verdict still flipped between `PASS` and `EXCLUDE`.
 
-When the lift lands within 20 percent of 1.0 either way, the report says so next to the
-verdict and names the lift. Two bucket sizes that disagree mean the detector is sitting on
-the floor, not that one of the runs is wrong. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the
-band, and `check_result.json` carries the same flag as `near_floor`.
-
-This notice is not enough on its own, which is why the bucket sweep above exists. A near
-the floor notice says the margin is thin. The sweep says whether the answer actually moves.
-In alerts mode the notice now points at the sweep result instead of asking you to go and
-re-run the thing yourself.
+When the lift is within 20 percent of 1.0 either way, the report says so next to the verdict
+and names the lift. In alerts mode it points at the sweep result, which shows whether the
+answer actually moves. `NEAR_FLOOR_BAND` in `fdes/byod.py` sets the band, and
+`check_result.json` carries the flag as `near_floor`.
 
 ## Overlapping alert windows
 
-Windows are unioned into one alerted mask, because the question each bucket answers is
-"was this bucket alerted", and two concurrent alerts on the same bucket are still one
-alerted bucket. Concurrent alerts are normal on real data. Latency stories on different
-services overlap constantly, so a row count can overstate the alert time badly. On one
-Datadog Watchdog export, 156 stories merged into 95 distinct stretches and about a quarter
-of the alert time sat under another story.
+Windows are unioned into one alerted mask, because two concurrent alerts on the same bucket
+are still one alerted bucket. Concurrent alerts are common, for example latency stories on
+several services at once, so a row count can overstate alert time. In one Watchdog export,
+156 stories merged into 95 distinct stretches and about a quarter of the alert time sat under
+another story.
 
-The union is kept and the cost of it is reported. Every run states the input row count, the
-number of distinct stretches after merging, and how many buckets were absorbed. When the
-absorbed share reaches 10 percent the report says so at the top as well, so the row count is
-not read as a measure of covered time. The same counts are in `check_result.json` under
-`coverage`.
+Every run states the input row count, the number of distinct stretches after merging, and
+how many buckets were absorbed. When the absorbed share reaches 10 percent the report also
+says so at the top. The counts are in `check_result.json` under `coverage`.
 
 ## The time range, and why it is not guessed
 
-Alerts and incidents say when something happened. They do not say when you were watching.
-So `check` refuses to infer the evaluation range from them and asks for `--from` and
-`--to`, printing the span of your data so you can copy it.
+Alerts and incidents say when something happened, not when you were watching. `check`
+therefore does not infer the evaluation range from them. It asks for `--from` and `--to` and
+prints the span of your data so you can copy it.
 
-`--infer-range` uses that span anyway. It makes the range as tight as the events allow,
-which throws away every quiet period outside them, and that inflates prevalence and
-flatters precision. It is there for a quick look, and the report says loudly that it was
-used.
+`--infer-range` uses that span anyway. That removes every quiet period outside the events,
+which inflates prevalence and flatters precision. It is meant for a quick look, and the
+report states that it was used.
 
 ## What it computes
 
@@ -517,120 +364,114 @@ used.
 | Predict-all baseline F1 = 2p/(1+p), and F1 minus it | 2, 7 | yes | yes |
 | Lift over the predict-all baseline | 7 | yes | yes |
 | Flag-everything guard on F1 and recall | 8b | yes | yes |
-| Flag-everything guard on the alerted rate against prevalence, on either of two paths | 8b | yes | yes |
-| The alerted rate over prevalence, reported when it is high and neither path fired | input quality | yes | yes |
-| A notice when a `PASS` sits on recall under 0.5 | input quality | yes | yes |
+| Flag-everything guard on the alerted rate against prevalence | 8b | yes | yes |
+| The alerted rate over prevalence, reported when it is high and the guard did not fire | input quality | yes | yes |
+| A notice when a `PASS` rests on recall under 0.5 | input quality | yes | yes |
 | Degenerate output guard (alerts on all, alerts on none, one near-constant score) | 8 | yes | yes |
 | Implausibly long and lopsided incident rows | input quality | yes | yes |
-| Verdict at 1m, 5m, 15m and 1h, and whether they agree | input quality | yes, and `--no-sweep` still reports it | **no** |
-| Scope overlap between the two files, and whether an empty one is a naming difference | input quality | yes, when both files carry a scope column | **no** |
-| AUC-ROC against its 0.5 reference | 6, 7, 8a | **no** | yes |
-| PR-AUC against its p reference | 6, 7 | **no** | yes |
-| VUS-PR and VUS-ROC | 6 | **no** | yes, but only when every bucket in the range holds a score sample |
-| Degenerate rule from the article's Table 12 | 8 | **no** | yes |
+| Verdict at 1m, 5m, 15m and 1h, and whether they agree | input quality | yes, and `--no-sweep` still reports it | no |
+| Scope overlap between the two files, and whether an empty one is a naming difference | input quality | yes, when both files carry a scope column | no |
+| AUC-ROC against its 0.5 reference | 6, 7, 8a | no | yes |
+| PR-AUC against its p reference | 6, 7 | no | yes |
+| VUS-PR and VUS-ROC | 6 | no | yes, when every bucket in the range holds a score sample |
+| Degenerate rule from the article's Table 12 | 8 | no | yes |
 
-**Known limit in the degenerate output guard.** The near-constant test measures the spread
-of the score column against its mean, so it reads a large constant offset as if the whole
-column were constant. A series of `1e9 +/- 100` has a relative spread of 2e-7, under the
-1e-6 tolerance, so it is called near-constant and excluded even though its ordering carries
-real information. Rank metrics only read the ordering, so the offset should not matter. The
-guard errs towards refusing rather than passing, and the report prints `score_spread` and
-`distinct_scores` so the call can be checked. Centre the series, or subtract the offset, to
-work around it. `CONSTANT_SPREAD_RATIO` in `fdes/byod.py` sets the tolerance.
+The near-constant test in the degenerate output guard measures the spread of the score
+column against its mean, so a large constant offset reads as a constant column. A series of
+`1e9 +/- 100` has a relative spread of 2e-7, under the 1e-6 tolerance, and is excluded
+although its ordering carries information. The guard errs towards refusing, and the report
+prints `score_spread` and `distinct_scores` so you can check the call. Centre the series or
+subtract the offset to avoid it. `CONSTANT_SPREAD_RATIO` in `fdes/byod.py` sets the tolerance.
 
 ## What alerts mode refuses to compute, and why
 
-**A threshold-independent rank metric cannot be computed from binary alerts.** A rank
-metric sweeps the threshold and measures how well the scores order the buckets. An alert
-window is a decision, not a score, so the threshold has already been applied and there is
-no ordering left to sweep.
+A threshold-independent rank metric cannot be computed from binary alerts. A rank metric
+sweeps the threshold and measures how well the scores order the buckets. An alert window is
+a decision with the threshold already applied, so there is no ordering left to sweep.
 
-Passing a 0/1 vector to an AUC function does return a number. That number is a rescaling
-of the balanced accuracy at the one operating point you already have. It is a different
-quantity from a score-based AUC-ROC, and printing it in the same column as one would be
-the exact mistake this specification exists to stop. So alerts mode does not print it at
-all. The report has a "What this run could not compute" section that names AUC-ROC, PR-AUC,
-VUS-PR and VUS-ROC and gives the reason in full.
+An AUC function given a 0/1 vector does return a number, but it is a rescaling of the
+balanced accuracy at the one operating point you already have, a different quantity from a
+score-based AUC-ROC. Alerts mode does not print it. The report's "What this run could not
+compute" section names AUC-ROC, PR-AUC, VUS-PR and VUS-ROC and gives the reason.
 
-Section 8a is the exclusion that fires when a threshold-independent score sits at or below
-its random reference. With no rank metric there is nothing to compare against 0.5, so
-section 8a cannot fire in alerts mode. The report says that too. **A PASS in alerts mode
-rests on fewer checks than a PASS in scores mode, and it is not evidence that section 8a
-would have been passed.** To get the rest, export the underlying anomaly score or deviation
+Section 8a excludes a detector whose threshold-independent score sits at or below its random
+reference. Without a rank metric it cannot fire, and the report says so. A `PASS` in alerts
+mode rests on fewer checks than a `PASS` in scores mode and is not evidence that section 8a
+would have been passed. To get the rest, export the underlying anomaly score or deviation
 series and use scores mode.
 
-The same refusal applies in scores mode when the score column holds two or fewer distinct
-values. A 0/1 column is alerts in disguise.
+Scores mode refuses the same metrics when the score column holds two or fewer distinct
+values, because a 0/1 column is alerts in another form.
 
 ## The threshold in scores mode
 
-FDES section 5 step 2 wants the threshold picked on a validation split that is disjoint
-from the test set. One CSV cannot give that. So:
+FDES section 5 step 2 requires the threshold to be picked on a validation split disjoint
+from the test set, which one CSV cannot provide.
 
-- pass `--threshold` with the value your monitor actually uses, and you get your real
-  operating point,
-- or pass nothing, and the threshold is tuned in sample to maximise F1. That is an
-  optimistic upper bound, not a held-out estimate, and the report says so every time.
+- Pass `--threshold` with the value your monitor uses to get your real operating point.
+- Without it, the threshold is tuned in sample to maximise F1. That is an optimistic upper
+  bound, and the report says so every time.
 
 `--aggregate max` (the default) or `--aggregate mean` reduces several score samples inside
-one bucket. Buckets with no score sample at all are dropped from the evaluation rather than
-treated as low-scoring, and the report counts them. Dropping them puts holes in the time
-axis, so VUS is skipped whenever any bucket is empty. VUS is range based and would score a
-timeline that never existed. AUC-ROC and PR-AUC ignore order and are reported either way.
+one bucket. Buckets with no score sample are dropped from the evaluation, not treated as
+low-scoring, and the report counts them. Dropping them leaves gaps in the time axis, so VUS,
+which is range based, is skipped whenever any bucket is empty. AUC-ROC and PR-AUC ignore
+order and are reported either way.
 
 ## The constants, and where to change them
 
-Every threshold in these checks is a named constant. None of them is a law. If your
-operation has a different tolerance, change the constant rather than working around the
-verdict. This table is generated from the source so it cannot drift.
+Every threshold in these checks is a named constant. If your operation has a different
+tolerance, change the constant rather than working around the verdict. The values below are
+those in v1.4.1. The source is authoritative.
 
-| Constant | Value | File | What it is |
+| Constant | Value | File | What it sets |
 |---|---|---|---|
-| `ALERTS_PER_INCIDENT_LIMIT` | `50.0` | `byod.py` | Alert volume, measured against the incidents there were to find. This is deliberately a ratio and not a rate per clock hour. An absolute clock... |
-| `ALERT_RATE_MULTIPLE` | `4.0` | `checks.py` | Not a guard constant. the ratio worth printing, see byod |
-| `ALERT_RATE_PRODUCT` | `2.0` | `checks.py` | Section 8b read on the alerted rate, see alert_rate_saturated |
-| `CONCENTRATION_MIN_ROWS` | `5` | `byod.py` | See the section above. |
-| `CONCENTRATION_NOTICE` | `0.50` | `byod.py` | See the section above. |
-| `CONCENTRATION_TOP_FRACTION` | `0.10` | `byod.py` | The general form of the same problem: a few rows own most of the positive class, whether or not any single one of them is long enough to look broken.... |
-| `CONSTANT_SPREAD_RATIO` | `1e-6` | `byod.py` | Relative spread at or below this counts as a near-constant score. |
-| `DEGENERATE_AUC` | `0.55` | `checks.py` | Article rule (Table 12) |
-| `DEGENERATE_F1_RATIO` | `0.95` | `checks.py` | Article rule (Table 12) |
-| `DOMINANT_ALERT_MIN_ROWS` | `5` | `byod.py` | Below this the share is arithmetic, not a finding |
-| `DOMINANT_ALERT_SHARE` | `0.30` | `byod.py` | One alert window owning this much alerted time gets named |
-| `FLOOR_MARGIN` | `0.05` | `checks.py` | Section 8b, "stated margin" used by this package (5 percent) |
-| `IMPLAUSIBLE_PREVALENCE` | `0.50` | `byod.py` | Above this, most of the window was an incident. Say so loudly |
-| `LONG_INCIDENT_MEDIAN_MULTIPLE` | `10.0` | `byod.py` | See the section above. |
-| `LONG_INCIDENT_MIN_ROWS` | `3` | `byod.py` | The median needs a population to be a median. Below this many in-range rows there is no distribution to be an outlier against, so the guard stays... |
-| `LONG_INCIDENT_RANGE_SHARE` | `0.10` | `byod.py` | 1. It covers at least this share of the observation range. A window that spans a tenth of everything you watched is not an incident any more, it is a... |
-| `LOW_RECALL_NOTICE` | `0.50` | `byod.py` | But a PASS at recall 0.071, which one real run produced from four instantaneous alerts over four days, is carried entirely by precision and by a low... |
-| `MAX_BUCKETS` | `5_000_000` | `byod.py` | Refuse to build a grid larger than this. 5 million buckets is 9.5 years at 60 seconds. |
-| `MIN_DISTINCT_SCORES` | `3` | `byod.py` | A score column with this many distinct values or fewer is treated as already thresholded. |
-| `NEAR_BAR_BAND` | `0.10` | `byod.py` | An exclusion this close to the bar says so, see the reason text |
-| `NEAR_FLOOR_BAND` | `0.20` | `byod.py` | A lift this close to 1.0 either way gets its own line near the top of the report. The verdict there turns on a rounding-level difference and it moves... |
-| `OVERLAP_NOTICE` | `0.10` | `byod.py` | Overlap at or above this share of the window time gets its own line near the top of the report, because at that point the input row count no longer... |
-| `PREVALENCE_DRIFT_NOTICE` | `2.0` | `byod.py` | Prevalence moving this much across the ladder gets named |
-| `RANDOM_AUC_REFERENCE` | `0.5` | `checks.py` | Section 7, ROC family |
-| `RATIO_NOTICE_MULTIPLE` | `ALERT_RATE_MULTIPLE` | `byod.py` | So the ratio is reported wherever it is high and the guard did not act on it. The reporting threshold is path A's multiple rather than a new number,... |
-| `RECALL_SATURATION` | `0.95` | `checks.py` | Section 8b, "recall near saturation" |
-| `SCOPE_ECHO_CAUTION` | `(` | `byod.py` | See the section above. |
-| `SCOPE_NAMESPACE_MAX_SCOPES` | `1` | `byod.py` | Two or three scopes against thirty is suggestive of the same thing and it is not unambiguous, because two exports really can cover two small... |
-| `SCOPE_OVERLAP_POOR` | `0.50` | `byod.py` | ------------------------------------------------------------------------- scope overlap Alerts and incidents can describe different systems and the... |
-| `SUPPRESSION_MAX_LEVERAGE` | `50.0` | `byod.py` | How much of the rate the bucket may be blamed for |
-| `ZERO_LENGTH_DUTY_LIMIT` | `0.20` | `byod.py` | Above this share of point events, duty cycle means nothing |
+| `ALERTS_PER_INCIDENT_LIMIT` | `50.0` | `byod.py` | alerts per merged incident stretch above which alert volume is reported as too high |
+| `ALERT_RATE_MULTIPLE` | `4.0` | `checks.py` | the ratio to prevalence above which the ratio is printed even when the guard did not fire |
+| `ALERT_RATE_PRODUCT` | `2.0` | `checks.py` | the alerted-rate guard, which fires when the alerted rate squared reaches this times prevalence |
+| `CONCENTRATION_MIN_ROWS` | `5` | `byod.py` | minimum incident rows before the lopsided-file notice applies |
+| `CONCENTRATION_NOTICE` | `0.50` | `byod.py` | share of incident time owned by the longest rows that triggers the lopsided-file notice |
+| `CONCENTRATION_TOP_FRACTION` | `0.10` | `byod.py` | the fraction of rows treated as the longest for that notice |
+| `CONSTANT_SPREAD_RATIO` | `1e-6` | `byod.py` | relative spread at or below which a score column counts as near-constant |
+| `DEGENERATE_AUC` | `0.55` | `checks.py` | AUC bound in the article's Table 12 degenerate rule |
+| `DEGENERATE_F1_RATIO` | `0.95` | `checks.py` | F1-to-floor ratio in the article's Table 12 degenerate rule |
+| `DOMINANT_ALERT_MIN_ROWS` | `5` | `byod.py` | minimum alert rows before a dominant window is named |
+| `DOMINANT_ALERT_SHARE` | `0.30` | `byod.py` | share of alerted time one window must own to be named |
+| `FLOOR_MARGIN` | `0.05` | `checks.py` | the section 8b margin around the predict-all floor |
+| `IMPLAUSIBLE_PREVALENCE` | `0.50` | `byod.py` | prevalence above which the report warns that most of the window was an incident |
+| `LONG_INCIDENT_MEDIAN_MULTIPLE` | `10.0` | `byod.py` | multiple of the median incident length for an implausibly long row |
+| `LONG_INCIDENT_MIN_ROWS` | `3` | `byod.py` | minimum in-range incident rows for the long-row guard |
+| `LONG_INCIDENT_RANGE_SHARE` | `0.10` | `byod.py` | share of the observation range for an implausibly long row |
+| `LOW_RECALL_NOTICE` | `0.50` | `byod.py` | recall below which a `PASS` carries a low-recall notice |
+| `MAX_BUCKETS` | `5_000_000` | `byod.py` | largest bucket grid the tool will build (9.5 years at 60 seconds) |
+| `MIN_DISTINCT_SCORES` | `3` | `byod.py` | a score column with this many distinct values or fewer is treated as already thresholded |
+| `NEAR_BAR_BAND` | `0.10` | `byod.py` | how close to the guard bar or the alert-volume limit a result must be to be reported as near it |
+| `NEAR_FLOOR_BAND` | `0.20` | `byod.py` | distance of the lift from 1.0 that triggers the near-floor notice |
+| `OVERLAP_NOTICE` | `0.10` | `byod.py` | share of window time under another window that triggers the overlap notice |
+| `PREVALENCE_DRIFT_NOTICE` | `2.0` | `byod.py` | factor by which prevalence may move across the bucket sweep before it is named |
+| `RANDOM_AUC_REFERENCE` | `0.5` | `checks.py` | random reference for AUC-ROC (section 7) |
+| `RATIO_NOTICE_MULTIPLE` | `4.0` | `byod.py` | the same value as `ALERT_RATE_MULTIPLE`, used for the report notice |
+| `RECALL_SATURATION` | `0.95` | `checks.py` | recall at which section 8b treats recall as saturated |
+| `SCOPE_NAMESPACE_MAX_SCOPES` | `1` | `byod.py` | distinct scopes on one side that mark an empty intersection as a naming difference |
+| `SCOPE_OVERLAP_POOR` | `0.50` | `byod.py` | share of alert rows on unmatched scopes that triggers the scope warning |
+| `SUPPRESSION_MAX_LEVERAGE` | `50.0` | `byod.py` | how much of the alerted rate may be blamed on the bucket size |
+| `SWEEP_BUCKETS` | `("1m", "5m", "15m", "1h")` | `byod.py` | the bucket sizes in the alerts-mode sweep |
+| `ZERO_LENGTH_DUTY_LIMIT` | `0.20` | `byod.py` | share of point events above which the duty cycle is not used |
 
 ## A worked example
 
-```bash
-$ make check ALERTS=examples/alerts_useless.csv
-```
+The output below is the report for the bundled `alerts_useless.csv`, a deliberately useless
+detector.
 
-The bundled `alerts_useless.csv` is a deliberately useless detector. Regenerated from the
-current build, so it always matches what the tool actually prints.
+```bash
+$ python bin/reproduce.py check --alerts examples/alerts_useless.csv \
+    --incidents examples/incidents.csv --bucket 5m --infer-range
+```
 
 ```
 # FDES v1.0.0-draft check report: your own data (alerts mode)
 
-Produced by otel-aiops-reproduction v1.3.9. The specification version and the tool version are different things, and a report that names only the first cannot be traced back to the build that made it.
+Produced by otel-aiops-reproduction v1.4.1. The specification version and the tool version are different things, and a report that names only the first cannot be traced back to the build that made it.
 
 Verdict: **EXCLUDE**
 

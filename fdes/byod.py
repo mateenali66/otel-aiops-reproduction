@@ -48,7 +48,7 @@ from .checks import (ALERT_RATE_MULTIPLE, ALERT_RATE_PRODUCT, DEGENERATE_AUC,
                      check_state, flag_everything,
                      predict_all_f1)
 
-# Header names seen in real exports. Matching is case insensitive and ignores surrounding
+# Header names common in alert and incident exports. Matching is case insensitive and ignores surrounding
 # whitespace. Pass --start-col, --end-col, --timestamp-col or --score-col to override, and
 # --incident-start-col or --incident-end-col when the incident CSV names its columns
 # differently from the alerts CSV.
@@ -79,48 +79,33 @@ NEAR_BAR_BAND = 0.10    # an exclusion this close to the bar says so, see the re
 IMPLAUSIBLE_PREVALENCE = 0.50   # above this, most of the window was an incident. Say so loudly
 PREVALENCE_DRIFT_NOTICE = 2.0   # prevalence moving this much across the ladder gets named
 ZERO_LENGTH_DUTY_LIMIT = 0.20   # above this share of point events, duty cycle means nothing
-# Two gates on the quantisation suppression, and they close each other's holes. See
-# run_check for why neither is enough alone.
+# Limits on the quantisation suppression. See run_check.
 SUPPRESSION_MAX_LEVERAGE = 50.0        # how much of the rate the bucket may be blamed for
-# Alert volume, measured against the incidents there were to find. This is deliberately a
-# ratio and not a rate per clock hour. An absolute clock constant produced a hard step, where
-# 720 alerts in a month passed and 726 excluded with the leverage, duty cycle, precision and
-# recall all identical, which is the same defect class the guard itself took four rounds to
-# lose. It was also an average, so clustering laundered it: three alerts in every third hour
-# averages to 0.99 an hour and pages in bursts, which is the normal shape of a flapping
-# detector rather than an exotic one.
+# Alert volume, measured against the incidents there were to find. A rate per clock hour
+# would put a hard step at an arbitrary count (720 alerts a month passing and 726 excluded,
+# with every other number identical), and as an average it would hide clustered alerting:
+# three alerts every third hour averages 0.99 an hour, which is how a flapping detector pages.
 ALERTS_PER_INCIDENT_LIMIT = 50.0
 # Bucket sizes to suggest re-running with when the lift lands in that band.
 SUGGESTED_BUCKETS = ("1m", "5m", "15m", "1h")
 
 # ------------------------------------------- the alerted rate ratio, reported not excluded
-# The guard in fdes/checks.py has two ways in and neither of them reaches a detector that
-# alerts on a modest share of the time at a ratio well above prevalence. Path A wants an
-# alerted rate of 0.5, path B wants 0.20 with a ratio of 10. A detector alerting on a tenth
-# of the timeline at eight times prevalence walks past both, and on real exports that band
-# is where a lot of them sit. The ratio measured on the second real run ran from 11.7 to
-# 14.7 while the alerted rate topped out at 0.396 and 0.486, and the report said nothing
-# about the ratio at all.
-#
-# So the ratio is reported wherever it is high and the guard did not act on it. The
-# reporting threshold is path A's multiple rather than a new number, because that is the
-# smallest ratio anything in this package already treats as worth a second look. A lower
-# threshold would fire on ordinary detectors, and a higher one would leave a gap under the
-# guard's own bar.
+# The guard in fdes/checks.py does not reach a detector that alerts on a modest share of the
+# time at a ratio well above prevalence. Path A needs an alerted rate of 0.5 and path B 0.20
+# with a ratio of 10, so a detector alerting on a tenth of the timeline at eight times
+# prevalence passes both. The ratio is therefore reported wherever it is high and the guard
+# did not act. The threshold reuses path A's multiple, the smallest ratio the package already
+# treats as worth a second look. A lower one would fire on ordinary detectors, and a higher
+# one would leave a gap under the guard's bar.
 RATIO_NOTICE_MULTIPLE = ALERT_RATE_MULTIPLE
 
 # ------------------------------------------------------------------------- thin recall
-# Nothing in the procedure sets a minimum recall, and that is deliberate. See the README
-# section "There is no minimum recall". A high-precision detector that fires rarely and is
-# usually right is a real thing worth keeping, and bucket-level recall is pushed down by the
-# export format as much as by the detector. A file of instantaneous alerts cannot reach high
-# bucket recall whatever the detector did, because an alert covers one bucket and an
-# incident covers many.
-#
-# But a PASS at recall 0.071, which one real run produced from four instantaneous alerts
-# over four days, is carried entirely by precision and by a low floor. The detector missed
-# 93 percent of the incident time. Below this recall the detector misses more incident time
-# than it catches, so the PASS gets a line saying so and the reader decides.
+# The procedure sets no minimum recall (docs/METHOD.md, "There is no minimum recall"). A
+# detector that fires rarely and is usually right is worth keeping, and bucket-level recall
+# depends on the export format as much as on the detector, since an instantaneous alert
+# covers one bucket while an incident covers many. A PASS below this recall is carried by
+# precision and a low floor, and the detector missed more incident time than it caught, so
+# the report says so.
 LOW_RECALL_NOTICE = 0.50
 
 # --------------------------------------------------------------------- the bucket sweep
@@ -128,30 +113,23 @@ LOW_RECALL_NOTICE = 0.50
 # user passed, and reports the verdict at each. The ladder spans two orders of magnitude,
 # which is the range an operator would plausibly pick from by hand.
 #
-# The bucket size is not a neutral parameter. A coarse bucket lets one short alert cover a
-# whole bucket of incident time for free, so recall climbs with the bucket size while
-# precision is barely charged for it. On one real export the lift climbed monotonically
-# through 0.82, 0.90, 1.05, 1.21, 1.25 and 1.28 at 1m, 5m, 15m, 30m, 1h and 2h, and the
-# verdict went from EXCLUDE to PASS on the way. Handing back the verdict at one bucket as
-# if it were settled hides that the operator picked the answer when they picked the bucket.
+# The bucket size can decide the verdict. A coarse bucket lets one short alert cover a whole
+# bucket of incident time, so recall rises with the bucket size while precision barely moves,
+# and a verdict can go from EXCLUDE to PASS across the ladder. Reporting every size shows when
+# the choice of bucket picked the answer.
 SWEEP_BUCKETS = ("1m", "5m", "15m", "1h")
 
 # ------------------------------------------------------- implausibly long incident rows
-# Every incident tracker has tickets nobody closed. One real PagerDuty export held 23
-# incidents over 35.6 days, and two of them had been left open for 13 and 12 days. Those
-# two rows held 601 of the 620 incident-hours in the file. Prevalence came out at 0.383
-# instead of 0.020 and the verdict turned over. Nobody was in a 13 day outage.
+# Incident trackers keep tickets nobody closed. Two rows left open for days can hold almost
+# all the incident time in a file, which inflates prevalence and can turn the verdict over.
 #
-# A row is called implausibly long when both of these hold, because either one alone is
-# wrong on its own.
+# A row is called implausibly long when both of these hold, because neither is enough alone.
 #
-#   1. It covers at least this share of the observation range. A window that spans a tenth
-#      of everything you watched is not an incident any more, it is a state. Without this
-#      condition a five minute blip would be flagged in a file where the median row is ten
-#      seconds, which is ordinary spread and not a stuck ticket.
+#   1. It covers at least this share of the observation range. Without this condition a five
+#      minute blip would be flagged in a file where the median row is ten seconds.
 #   2. It runs at least this multiple of the median row. Without this condition a genuinely
 #      long outage in a short observation window would be flagged. A four hour incident in
-#      a day of data is 17 percent of the range and it is perfectly real.
+#      a day of data is 17 percent of the range and it is real.
 LONG_INCIDENT_RANGE_SHARE = 0.10
 LONG_INCIDENT_MEDIAN_MULTIPLE = 10.0
 # The median needs a population to be a median. Below this many in-range rows there is no
@@ -166,36 +144,27 @@ CONCENTRATION_NOTICE = 0.50
 CONCENTRATION_MIN_ROWS = 5
 
 # ------------------------------------------------------------------------- scope overlap
-# Alerts and incidents can describe different systems and the CSVs carry no notion of it.
-# One real run scored 156 Watchdog alerts across 34 services against 23 PagerDuty incidents
-# that all came from one service. Most of those alerts could not have matched anything in
-# the file, and every one of them was charged as a false positive.
-# When this share of the alert rows falls on a scope that appears in no incident, the two
-# files are probably not describing the same system.
+# Alerts and incidents can describe different systems, and the CSVs carry no notion of it.
+# An alert on a service that appears in no incident cannot match anything and is charged as
+# a false positive. When this share of the alert rows falls on such scopes, the two files are
+# probably not describing the same system.
 SCOPE_OVERLAP_POOR = 0.50
 
 # ------------------------------------------------------- an empty scope intersection
-# An empty intersection is a different thing from a poor overlap, and the remedy for a poor
-# overlap does not work on it. Filtering both exports to the scopes they share leaves an
-# empty file when there is nothing in the intersection.
+# An empty intersection differs from a poor overlap, and the remedy for a poor overlap,
+# filtering both exports to the scopes they share, leaves an empty file.
 #
-# One shape of empty intersection is not a system mismatch at all. A second real run carried
-# 31 scopes from Datadog's `service` tag, which are application names such as `app-api` and
-# `app-admin-db`, against exactly 1 scope from PagerDuty's `service` field, which was
-# `Example-Alerts`, a single catch-all routing destination. Both vendors call the
-# field `service` and they mean different things by it. Datadog means the application the
-# signal came from. PagerDuty means where the page was sent. The intersection is empty by
-# construction and always will be, and the 100 percent unmatched share measures the naming
-# rather than the systems.
+# One kind of empty intersection comes from naming alone. An alerting tool can tag rows with
+# the application that raised them (Datadog's `service` tag) while the incident tool records
+# where the page was routed (PagerDuty's `service` field), so many application names meet one
+# catch-all routing name. Both call the field `service`. The intersection is empty by
+# construction, and the unmatched share measures the naming.
 #
-# A side carrying exactly one distinct scope is the signature of that. One value cannot be a
-# partial list of application names, it is a constant, so the reading is unambiguous and the
-# tool says so plainly.
-#
-# Two or three scopes against thirty is suggestive of the same thing and it is not
-# unambiguous, because two exports really can cover two small overlapping estates. So the
-# threshold stays at one. Every other empty intersection is still reported as a possible
-# system mismatch, and only the unusable filter remedy is withheld from it.
+# A side with exactly one distinct scope is the signature of that, since one value is a
+# constant and cannot be a partial list of applications. Two or three scopes against thirty
+# could be either, because two exports can cover two small overlapping estates, so the
+# threshold stays at one. Every other empty intersection is reported as a possible system
+# mismatch, without the filter remedy.
 SCOPE_NAMESPACE_MAX_SCOPES = 1
 
 _TZ_SUFFIX = re.compile(r"(?:Z|z|[+-]\d{2}:?\d{2})$")
@@ -330,16 +299,10 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
         raise InputError(f"{path}: {backwards} row(s) end before they start. "
                          f"Check the '{s_name}' and '{e_name}' columns.")
 
-    # A window that ends the same second it starts is an instantaneous event, not a broken
-    # row. Real exports carry them: a Datadog Watchdog story that emitted a single event
-    # has one timestamp, so start equals end. These are marked onto the one bucket that
-    # contains them, which is what mark_windows already does.
-    #
-    # This is deliberately NOT treated like a row that ends before it starts. That one is
-    # impossible and means the columns are wrong. A zero-length row is possible and means
-    # the event was instantaneous. An earlier version refused both, which rejected real
-    # vendor exports outright and offered a remedy, dropping the end column, that would
-    # have turned every other row into a point event too.
+    # A window that ends the same second it starts is an instantaneous event, for example a
+    # single-event Datadog Watchdog story. It is marked onto the one bucket that contains it,
+    # as mark_windows already does. A row that ends before it starts is different: it is
+    # impossible and means the columns are wrong, so only that one is refused.
     zero_length = int((ends == starts).sum()) if not point_events else 0
 
     sev_name = pick_column(df, SEVERITY_COLS, None, "severity", path, required=False)
@@ -348,8 +311,7 @@ def read_windows(path: Path, start_col: str | None, end_col: str | None,
         severities = {str(k): int(v) for k, v in
                       df[sev_name].astype(str).value_counts().items()}
 
-    # The scope column says what each row is about. It is optional, and a file without one
-    # behaves exactly as it did before. The per-row values travel under "scope_values" and
+    # The scope column says what each row is about. It is optional. The per-row values travel under "scope_values" and
     # the caller lifts them out before the note is written to JSON.
     scope_name = pick_column(df, SCOPE_COLS, scope_col, f"{label} scope", path, required=False)
     if scope_name is None:
@@ -478,13 +440,11 @@ def duty_cycle(grid: dict, starts: np.ndarray, ends: np.ndarray) -> float | None
         # rather than unknown, but zero would make every comparison below trivially true,
         # so it is reported as not measurable instead.
         return None
-    # The dangerous case is a mixture. A duty cycle computed from the durational rows alone
-    # says nothing about the instantaneous ones, and instantaneous rows still occupy a bucket
-    # and still page. An export of 5,184 point events plus one ten minute window produced a
-    # duty cycle of 0.0002 while alerting on 60 percent of the buckets, which was enough to
-    # suppress the guard entirely and pass a detector paging 173 times a day. Below the
-    # threshold the duty cycle is a measurement of a subset, not of the detector, and this
-    # returns nothing rather than something misleading.
+    # A mixture is the risky case. A duty cycle computed from the durational rows alone says
+    # nothing about the instantaneous ones, which still occupy a bucket and still page. Point
+    # events plus one long window can give a near-zero duty cycle while alerting on most of the
+    # buckets, which would suppress the guard. Below the threshold the duty cycle measures a
+    # subset of the detector, so nothing is returned.
     if zero_length / float(zero_length + len(a)) >= ZERO_LENGTH_DUTY_LIMIT:
         return None
     order = np.argsort(a, kind="stable")
@@ -508,8 +468,7 @@ def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.n
 
     Overlapping windows are unioned, because the question each bucket answers is "was this
     bucket alerted", and two concurrent alerts on the same bucket are still one alerted
-    bucket. The union hides how much window time was absorbed, so the note counts it. On
-    real vendor exports a quarter of the alert time can sit under another alert.
+    bucket. The union hides how much window time was absorbed, so the note counts it.
     """
     n, t0, w = grid["n_buckets"], grid["t_from"], grid["bucket_seconds"]
     marked = np.zeros(n, dtype=bool)
@@ -544,12 +503,9 @@ def mark_windows(grid: dict, starts: np.ndarray, ends: np.ndarray) -> tuple[np.n
 def raw_overlap(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
     """Whether these windows actually overlap in time, as opposed to sharing a bucket.
 
-    The bucket-level figure could not tell those apart, and reported the second as the
-    first. Twelve incident rows sitting 1500 seconds apart were described as overlapping,
-    with half the window time said to have sat under another window and been absorbed, when
-    no two of them touched at any point. They only collided inside an hourly bucket. That is
-    bucket occupancy reported as a temporal property of the file, which is the same root
-    cause as the quantisation defect fixed in 1.3.2.
+    Windows that never touch can still fall in the same bucket. Counting that as overlap
+    would report bucket occupancy as a property of the file, so overlap is measured on the
+    raw times.
     """
     lo, hi = int(grid["t_from"]), int(grid["t_to"])
     a = np.clip(np.asarray(starts, dtype=np.int64), lo, hi)
@@ -612,16 +568,10 @@ DOMINANT_ALERT_MIN_ROWS = 5   # below this the share is arithmetic, not a findin
 def alert_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
     """Find a single alert window that owns most of the alerted time.
 
-    There has been a check for a dominant incident row since the tool met its first real
-    export, because a forgotten ticket moves prevalence and the floor and never shows up in
-    the numbers. The alert side has exactly the same failure and had no check at all. On one
-    real Azure export a single still-firing alert drove 40 percent of the alerted rate out of
-    eight rows, and the alerted rate is what the flag-everything guard reads, so one
-    unresolved row can carry a verdict on its own.
-
     A still-open alert is the usual cause. An export taken while an alert is firing has no
-    end time, or an end time of now, and either way it covers everything up to the moment of
-    the query. Nothing is dropped here. The share is reported and the user decides.
+    end time, or an end time of now, so the row covers everything up to the query. The
+    alerted rate is what the flag-everything guard reads, so one such row can carry a verdict.
+    Nothing is dropped. The share is reported and the user decides.
     """
     seconds, touches = clip_to_range(grid, starts, ends)
     seconds = seconds[touches]
@@ -652,32 +602,15 @@ def merged_stretches(grid: dict, starts: np.ndarray, ends: np.ndarray,
                      gap_seconds: int = 0) -> int:
     """How many separate stretches these windows cover, after joining ones that touch.
 
-    Row count is a formatting property of an export, not a fact about the world. One outage
-    is written as one row by one tracker, as one row per affected service by another, and as
-    one row per status update by a third. Two teams with identical detectors and identical
-    outages should not get opposite verdicts because of that, and before this they did: the
-    same two one-hour incidents written as forty three-minute rows moved the alerts per
-    incident from 355 to 17.75 with prevalence, alerted rate, recall, precision, F1 and both
-    duty cycles all identical to the last decimal.
+    Row count depends on the export format. One outage can be one row in one tracker, one row
+    per affected service in another and one row per status update in a third, so incidents
+    are counted as stretches. The same two one-hour incidents written as forty three-minute
+    rows give the same alerts per incident as when written as two rows.
 
-    Only windows that touch or overlap are joined. The gap tolerance is zero, and that is a
-    correction rather than a default.
-
-    It was first written as the bucket size, on the reasoning that the caller had already
-    chosen that number so it added no constant of its own. That was wrong, and it broke the
-    bucket sweep. How many incidents there were is a fact about the world. Prevalence depends
-    on the bucket because it is defined as a bucket-level rate, and a count of incidents is
-    not. With a bucket-linked tolerance the same twelve incident rows counted as twelve
-    stretches at a five minute bucket and six at an hourly one, so alerts per incident
-    doubled on bucket size alone. Worse, the sweep computes this once and applies it to every
-    row of the ladder, so the whole sweep table moved with the bucket the user happened to
-    pass. The sweep exists to answer whether a verdict is a property of the detector or of
-    the chosen bucket, and it was answering with a table that depended on the chosen bucket.
-
-    Zero costs nothing. Measured on the case that motivated merging at all, the same two
-    outages written as forty rows collapse to two stretches at every tolerance from zero to
-    an hour. The bucket-linked value bought nothing that zero does not, and it bought bucket
-    dependence.
+    Only windows that touch or overlap are joined, with a gap tolerance of zero. A tolerance
+    tied to the bucket size would make the incident count, and so alerts per incident, change
+    with the bucket, and the sweep computes this once for every bucket in its ladder. Zero
+    still collapses forty rows written for two outages into two stretches.
     """
     lo, hi = int(grid["t_from"]), int(grid["t_to"])
     if not len(starts):
@@ -704,19 +637,14 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
                         i_start: np.ndarray, i_end: np.ndarray) -> float | None:
     """How many times this detector alerted for each incident there was to find.
 
-    Nothing else in this procedure measures alert frequency. Bucket occupancy does not,
-    because a window shorter than the bucket claims the whole bucket. The duty cycle does
-    not, because a detector paging 173 times a day in one-second bursts occupies less time
-    than one paging 6 times a day for a minute each. Two independent reviewers arrived at the
-    same conclusion from opposite directions, one by walking through the guard and one by
-    finding a clean PASS on a detector alerting 174 times a day.
+    Nothing else in the procedure measures alert frequency. Bucket occupancy does not,
+    because a window shorter than the bucket claims the whole bucket. The duty cycle does not,
+    because a detector paging 173 times a day in one-second bursts occupies less time than one
+    paging 6 times a day for a minute each.
 
-    A rate per clock hour was tried and was wrong twice over. It stepped, and it was an
-    average that clustering laundered. This is a ratio, so it moves with the data, and it
-    orders the known cases correctly: 31 for a detector worth keeping, 120 and 355 for two
-    that are not.
-
-    Counted on windows that touch the range, so neither file is charged for rows outside it.
+    It is a ratio to the incident count. A rate per clock hour would step at an arbitrary
+    count and average away clustered alerting. Counted on windows that touch the range, so
+    neither file is charged for rows outside it.
     """
     _, a_touch = clip_to_range(grid, a_start, a_end)
     incidents = merged_stretches(grid, i_start, i_end)
@@ -726,13 +654,12 @@ def alerts_per_incident(grid: dict, a_start: np.ndarray, a_end: np.ndarray,
 
 
 def duplicate_rows(starts: np.ndarray, ends: np.ndarray, grid: dict | None = None) -> dict:
-    """Rows sharing an identical start and end. Usually a fan-out, not a detector firing.
+    """Rows sharing an identical start and end, usually a notification fan-out.
 
-    A real Cloudflare export delivered every notification to four email recipients, so each
-    alert appeared four times with a distinct row identifier and an identical timestamp. That
-    quadrupled the alert count, quadrupled alerts per incident, and made the overlap notice
-    describe a distribution list as if it were a temporal property of the detector. The tool
-    noticed the rows were point events and did not notice they were quadruplicated.
+    Some exports write one row per notification recipient, so each alert appears several
+    times with a distinct row identifier and the same timestamp. That multiplies the alert
+    count and alerts per incident, and the overlap notice would describe a distribution list
+    as a property of the detector.
     """
     out = {"rows": int(len(starts)), "distinct": int(len(starts)), "duplicate_rows": 0,
            "max_multiplicity": 1, "looks_like_fan_out": False}
@@ -747,12 +674,10 @@ def duplicate_rows(starts: np.ndarray, ends: np.ndarray, grid: dict | None = Non
     # A fan-out is regular. Every row repeated the same number of times, more than once.
     out["looks_like_fan_out"] = bool(len(counts) > 1 and counts.min() == counts.max()
                                      and counts.min() > 1)
-    # Exact-pair matching catches only the synthetic case. Real delivery fan-out to four
-    # recipients does not produce four identical timestamps, it produces four deliveries a
-    # second or two apart, and one second of jitter defeated the check completely while
-    # doing identical damage. So also compare the row count against the number of separate
-    # stretches those rows actually cover. Repeated deliveries of one alert collapse into one
-    # stretch however they are jittered, because they overlap.
+    # Deliveries to several recipients often land a second or two apart, which exact-pair
+    # matching misses. So the row count is also compared with the number of separate stretches
+    # the rows cover. Repeated deliveries of one alert overlap, so they collapse into one
+    # stretch however they are jittered.
     if grid is not None:
         stretches = merged_stretches(grid, starts, ends)
         out["merged_stretches"] = stretches
@@ -771,8 +696,8 @@ def duplicate_notice(res: dict) -> str:
             f"the signature of a fan-out rather than of a detector repeating itself."
             if d["looks_like_fan_out"] else "")
     if not d["duplicate_rows"]:
-        # Caught by the stretch ratio rather than by exact matching. The timestamps differ,
-        # so this is weaker evidence and it is stated as weaker.
+        # Found by the stretch ratio, not by exact matching. The timestamps differ, so the
+        # evidence is weaker and the notice says so.
         return (f"Repeated alert rows, probably. {d['rows']} alert rows cover only "
                 f"{d['merged_stretches']} separate stretches of time, which is "
                 f"{d['rows_per_stretch']} rows for every stretch. No two rows share an exact "
@@ -824,11 +749,9 @@ def implausible_prevalence_notice(res: dict, grid: dict) -> str:
 def alert_volume_notice(res: dict) -> str:
     """Both the ratio and the absolute rate, because a ratio alone cannot be acted on.
 
-    Someone who owns the pager asked for three things this used to get wrong. It gave a
-    ratio with no absolute rate, so there was nothing to compare against a shift. It did not
-    say that alert rows are not pages, since real stacks deduplicate and group. And it put
-    the bucket-level precision in the same paragraph, where it reads as the fraction of
-    useful pages, which it is not.
+    The report gives an absolute daily rate to compare against a shift, says that alert rows
+    are not pages because alerting stacks deduplicate and group, and keeps bucket-level
+    precision out of the paragraph, where it would read as the fraction of useful pages.
     """
     per = res["alerts_per_incident"]
     day = res.get("alerts_per_day")
@@ -849,17 +772,17 @@ def alert_volume_notice(res: dict) -> str:
             f"the detector occupies, and a detector that pages constantly in short bursts "
             f"occupies very little of it, so a run can clear every check here while paging "
             f"far more often than anyone would read.\n\n"
-            f"Two things this cannot tell you. An alert window is not a page. Real stacks "
+            f"Two things this cannot tell you. An alert window is not a page. Alerting stacks "
             f"deduplicate and group, so these windows could be a handful of signals flapping "
             f"or they could be that many separate interruptions, and the export does not "
             f"say which. And the precision reported above, {_fmt(res['precision'], 3)}, is "
             f"measured per bucket and is not the fraction of pages that were worth reading. "
             f"With {windows} windows and {inc} incident stretches, at most {inc} of those "
             f"windows can be the first page for a real incident.\n\n"
-            f"The denominator moves with how long you assume an incident lasted. Measured on "
-            f"one real export, capping incident windows at an hour against leaving them "
-            f"uncapped moved this ratio by a factor of seventeen, while the decision to "
-            f"report it or not stayed the same at every setting. So read the flag and do not "
+            f"The denominator moves with how long you assume an incident lasted. On one "
+            f"export, capping incident windows at an hour instead of leaving them uncapped "
+            f"moved this ratio by a factor of seventeen, while the decision to report it "
+            f"stayed the same at every setting. So read the flag and do not "
             f"quote the number to two figures.\n\n"
             f"Whether this many pages is worth it is a judgement about your on-call load, "
             f"and this procedure does not make it. The limit that triggered this is a floor "
@@ -887,9 +810,8 @@ def dominant_alert_notice(res: dict) -> str:
 def incident_concentration(grid: dict, starts: np.ndarray, ends: np.ndarray) -> dict:
     """Find incident rows that are implausibly long, and measure how lopsided the file is.
 
-    A forgotten ticket is the most common way an incident export goes wrong, and it is
-    invisible in every number the tool prints. Prevalence, the predict-all floor and the
-    verdict all move with it, and the row itself never appears. So it gets named.
+    A ticket left open moves prevalence, the predict-all floor and the verdict, and the row
+    itself appears in no number the tool prints, so it is named.
 
     Nothing is dropped here. The counts are reported and the user decides.
     """
@@ -954,7 +876,7 @@ def prevalence_without_rows(grid: dict, starts: np.ndarray, ends: np.ndarray,
                             drop: list[int]) -> float | None:
     """Prevalence with a few incident rows taken out, so the cost of them is visible.
 
-    This is reported, never applied. Dropping a row is the user's call, not this tool's.
+    This is reported, never applied. Dropping a row is left to the user.
     """
     if not drop:
         return None
@@ -971,9 +893,8 @@ def scope_overlap(grid: dict, a_starts: np.ndarray, a_ends: np.ndarray, a_scopes
     """Compare what the two files are about, when both of them say.
 
     The CSVs carry no notion of scope, so an alert on a service that has no incident in the
-    file is scored as a false positive and there is no way for it to be anything else. When
-    the two exports cover different systems that is most of the alert rows, and every
-    number below is measured on a comparison that could not have come out any other way.
+    file is scored as a false positive. When the two exports cover different systems, most
+    alert rows are such false positives and the numbers mostly measure the mismatch.
     """
     out = {
         "checked": False,
@@ -1013,11 +934,9 @@ def scope_overlap(grid: dict, a_starts: np.ndarray, a_ends: np.ndarray, a_scopes
         "unmatched_incident_row_share": round(unmatched_incidents / len(i_rows), 4) if i_rows else None,
         "poor_overlap_threshold": SCOPE_OVERLAP_POOR,
     })
-    # This used to look at the alert side only, while the incident side was computed on the
-    # line above and thrown away. The two sides fail in opposite directions and both matter.
-    # Alerts on a scope with no incident are guaranteed false positives. Incidents on a scope
-    # no alert covers are guaranteed false negatives, and on one real Azure export 74 percent
-    # of incidents sat there while this flag stayed silent.
+    # Both sides are checked, because they fail in opposite directions. Alerts on a scope with
+    # no incident are guaranteed false positives. Incidents on a scope no alert covers are
+    # guaranteed false negatives.
     out["poor_alert_overlap"] = bool(
         a_rows and unmatched_alerts / len(a_rows) >= SCOPE_OVERLAP_POOR)
     out["poor_incident_overlap"] = bool(
@@ -1072,10 +991,9 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
     that the answer flipped, so it is listed and left out of the comparison.
     """
     # The duty cycle is a bucket-free quantity, so it is the same for every row of the
-    # ladder and is computed once. It has to be passed in, because without it every row was
-    # recomputed with the quantisation suppression missing. That put a PASS headline above a
-    # table whose row for the same bucket said EXCLUDE, and declared the run unstable on the
-    # strength of a disagreement with itself.
+    # ladder and is computed once. It is passed in so every row applies the same quantisation
+    # suppression as the headline run, which keeps a row from contradicting the headline at
+    # the same bucket.
     a_duty = duty_cycle(grid, a_start, a_end)
     i_duty = duty_cycle(grid, i_start, i_end)
     a_per_inc = alerts_per_incident(grid, a_start, a_end, i_start, i_end)
@@ -1111,9 +1029,8 @@ def bucket_sweep(grid: dict, a_start: np.ndarray, a_end: np.ndarray, a_note: dic
             "f1_predict_all": computed["f1_predict_all"],
             "f1_over_floor": computed["f1_over_floor"],
             "alert_rate_bar": computed.get("alert_rate_bar"),
-            # Which check actually decided this row. Without it the table shows lift passing
-            # at every bucket next to verdicts that flip, and a reader is left to infer a
-            # mechanism the prose then asserts for them, wrongly.
+            # Which check decided this row, so the table shows why a verdict changes between
+            # buckets.
             "decided_by": ([k for k, v in computed["checks"].items() if v] or ["nothing"])[0],
             "verdict": computed["verdict"],
         })
@@ -1266,9 +1183,8 @@ def evaluability_blockers(y: np.ndarray, mode: str, truth_rows: int | None,
                           alert_coverage: dict | None) -> list[str]:
     """Reasons this input cannot support a verdict at all.
 
-    These are input problems, not detector problems. They are kept apart from the exclusion
-    reasons because the two say opposite things to the person running the tool. One says
-    fix your detector. This one says fix your input.
+    These are input problems. They are kept apart from the exclusion reasons, because an
+    exclusion means fix the detector and these mean fix the input.
     """
     reasons: list[str] = []
     n = len(y)
@@ -1323,8 +1239,7 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
 
     Evaluability is settled first. When the input cannot support a verdict, no check is
     applied and every check reports that it could not be evaluated. A check that cannot be
-    evaluated must not report a pass, because three pass marks on a run that contains no
-    information is the exact failure this specification exists to criticise.
+    evaluated never reports a pass.
     """
     y = np.asarray(y).astype(int)
     pred = np.asarray(pred).astype(int)
@@ -1405,12 +1320,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                        "been passed.")})
 
     if mode == "scores":
-        # Raised by a reviewer, with a complication they raised too. There are no discrete
-        # alert windows in a score series, so there is nothing to count. Threshold
-        # up-crossings would be the equivalent, and in tuned-threshold runs the threshold is
-        # fitted to maximise F1 on the same data, so a count derived from it would be
-        # optimistic in exactly the way the tuned-operating-point caveat already describes.
-        # Stating the gap is honest. Filling it badly would not be.
+        # A score series has no discrete alert windows to count. Threshold up-crossings would
+        # be the equivalent, but with a threshold tuned on the same data the count inherits
+        # that optimism, so alert volume is listed as not computed in scores mode.
         not_computed.append({
             "metrics": ["alerts_per_incident"],
             "title": "Alert volume, meaning how often the detector would page",
@@ -1451,39 +1363,29 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     # display, and at a low prevalence that rounding moves the ratio by a whole percent.
     alert_rate = float(pred.mean()) if n else 0.0
     saturated = bool(both_classes and alert_rate_saturated(alert_rate, prevalence))
-    # The alerted rate is bucket occupancy, and at a coarse bucket that is not the same
-    # quantity the guard thinks it is reading. A detector catching six one-hour incidents in
-    # full, plus six one-minute false alarms a day, is in an alerting state 1.25 percent of
-    # the time against a prevalence of 0.83 percent, so it alerts 1.5 times as often as
-    # anything is wrong. At an hourly bucket every one-minute alarm claims a whole bucket,
-    # the alerted rate reads 0.25, and the guard excluded it while saying it alerted 30
-    # times as often as anything was wrong. That sentence was false, and it was the most
-    # confident sentence in the report.
+    # The alerted rate is bucket occupancy, which at a coarse bucket overstates how often a
+    # detector alerts. A detector catching six one-hour incidents in full, plus six one-minute
+    # false alarms a day, alerts 1.25 percent of the time against a prevalence of 0.83
+    # percent. At an hourly bucket each one-minute alarm claims a whole bucket, so the
+    # alerted rate reads 0.25, thirty times prevalence.
     #
-    # The test is the guard's own rule applied to the raw durations, which no bucket has
-    # touched. If it does not fire there, the exclusion belongs to the bucket size the user
-    # picked rather than to the detector, and this procedure will not exclude on that.
-    # Two gates on top of that, because the duty cycle alone cannot separate the case this
-    # protects from the case that abuses it. A detector emitting 5,184 one-second windows
-    # pages 173 times a day and has a duty cycle of 0.002, which is LOWER than the legitimate
-    # on-call detector's 0.0125. Ranked by duty cycle the abuser looks better behaved. An
-    # earlier gate counted rows where end equals start, which a one-second window walks
-    # straight past, and most real exports emit an end time.
+    # So the guard's own rule is also applied to the raw durations, which no bucket has
+    # touched. If it does not fire there, the exclusion comes from the bucket size and is
+    # suppressed. The duty cycle alone cannot separate that case from abuse: 5,184 one-second
+    # windows page 173 times a day with a duty cycle of 0.002, lower than the legitimate
+    # detector's 0.0125. So the suppression has two more conditions.
     #
-    # Leverage is how much of the alerted rate the suppression is being asked to blame on the
-    # bucket. The legitimate case runs about 20. The abuser runs 300, which is asking the
-    # tool to accept that the bucket invented 99.7 percent of the signal.
+    # Leverage, the alerted rate over the duty cycle, is how much of the rate the suppression
+    # blames on the bucket. The legitimate case runs about 20 and the one-second abuser about
+    # 300. It must stay at or under SUPPRESSION_MAX_LEVERAGE.
     #
-    # The rate per hour is the gate that finally separates them, and it is the one a reviewer
-    # asked for twice before I took it. The objection to it was that "too many pages" is an
-    # on-call judgement this tool refuses to make. That objection is answerable. This is not
-    # a claim about how many pages anyone can stand. The suppression's own argument is that
-    # the detector alerts briefly AND occasionally, and more than one alert an hour on
-    # average is not occasional, whatever your tolerance.
+    # Alerts per incident must stay at or under ALERTS_PER_INCIDENT_LIMIT. The suppression
+    # assumes the detector alerts briefly and occasionally, and a detector paging that often
+    # per incident does not.
     #
-    # Neither gate alone holds. Tune the windows to keep leverage under the cap and the rate
-    # per hour goes over. Thin the alerts to get under the rate per hour and the leverage
-    # goes over.
+    # Neither condition holds alone. Windows tuned to keep leverage under the cap push alerts
+    # per incident over the limit, and alerts thinned to get under the limit push leverage
+    # over the cap.
     leverage = (alert_rate / alert_duty) if alert_duty else None
     quantised = bool(saturated
                      and alert_duty is not None and truth_duty is not None
@@ -1521,18 +1423,12 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                            f"{round(floor, 4)} while recall {pm['recall']} is at or above "
                            f"{RECALL_SATURATION}, which is the flag-everything regime")
         if saturated and not deg["alerts_on_everything"]:
-            # This guard is the one most likely to fire on a real detector that works and
-            # simply costs too much to page on. When it does, the exclusion sentence has to
-            # carry what the detector got right, or an operator reads "EXCLUDE" plus a
-            # sentence about alert volume and concludes the thing does not detect anything.
+            # This guard can fire on a detector that works but pages too often, so the
+            # exclusion sentence also states what the detector got right.
             lift = (pm["f1_score"] / floor) if floor else None
-            # The near-floor notice already owns the band around a lift of 1.0, where it
-            # says the detector scores about what flagging every bucket would score. The
-            # counterweight used to start at a bare lift of 1.0, so the overlap printed
-            # both, a few lines apart, about the same number, saying opposite things. On
-            # real data a lift of 1.04 got "the detector is finding incidents" alongside
-            # "scores about what flagging every bucket would score". Inside that band the
-            # near-floor sentence is the honest one, so the counterweight stays quiet.
+            # The near-floor notice covers the band around a lift of 1.0, where the detector
+            # scores about what flagging every bucket would score. Inside that band the
+            # counterweight stays quiet, so the two notices do not contradict each other.
             near_the_floor = bool(lift is not None
                                   and abs(lift - 1.0) <= NEAR_FLOOR_BAND)
             found_things = bool(not near_the_floor
@@ -1581,16 +1477,10 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
         "sec8a_auc_at_or_below_random": check_state(
             sec8a, evaluable and computed.get("auc_roc") is not None),
         "sec8b_flag_everything": check_state(sec8b, evaluable),
-        # "pass" would be a lie when the guard reached the rate and was told to stand down
-        # because the rate is a bucketing artefact. The prose says "was not applied" and a
-        # reader who skims the table has to be told the same thing.
-        # Two ways this must not say "pass". The guard can be told to stand down because the
-        # rate is a bucketing artefact. And above a prevalence of 0.5 the bar is
-        # sqrt(2p) > 1, which no alerted rate can reach, so the check is structurally
-        # incapable of firing. The docstring proved the safe direction, that a perfect
-        # detector can never be caught. Nobody wrote down the dual. On a real export at a
-        # prevalence of 0.853 the table printed a bar of 1.306 next to the word pass, for a
-        # check that could not have failed.
+        # Two cases must not print "pass". The guard can stand down because the rate is a
+        # bucketing artefact, which the prose reports as not applied. And above a prevalence
+        # of 0.5 the bar is sqrt(2p) > 1, which no alerted rate can reach, so the check
+        # cannot fire.
         "alert_rate_far_above_prevalence": (
             "not applied, see the notice above" if quantised
             else "not reachable at this prevalence" if (rate_bar is not None and rate_bar > 1.0)
@@ -1605,20 +1495,17 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                                   and abs(lift - 1.0) <= NEAR_FLOOR_BAND)
     computed["near_floor_band"] = NEAR_FLOOR_BAND
     # How many times more often the detector alerted than anything was wrong. The guard
-    # above needs this AND an alerted rate over an absolute floor, and on real exports the
-    # ratio kept firing while the floor kept the guard silent. So the number is reported
-    # whenever it is high and the guard did not act on it, and the reader judges it.
+    # above needs this and an alerted rate over an absolute floor, so the ratio can be high
+    # while the guard stays silent. The number is reported whenever it is high and the guard
+    # did not act, and the reader judges it.
     ratio = round(alert_rate / prevalence, 2) if both_classes and prevalence > 0 else None
     computed["alerted_rate_over_prevalence"] = ratio
     computed["alerted_rate_ratio_notice_multiple"] = RATIO_NOTICE_MULTIPLE
     # When the rate is a bucketing artefact the quantisation notice above already gives the
     # ratio and says why it cannot be read at face value. Printing the ordinary ratio notice
     # underneath it would state the opposite about the same number.
-    # These two used to fold "is this true" together with "should this be printed". A run
-    # that already had an exclusion reason reported low_recall false while recall was 0.029,
-    # so anything reading the JSON downstream drew the opposite conclusion from the run. The
-    # fact is now recorded as the fact, and the decision about whether to print prose is a
-    # separate field with _notice in its name.
+    # Each fact has its own field, and whether the prose is printed is a separate field
+    # ending in _notice, so a JSON reader sees the fact even when the notice is held back.
     computed["alerted_rate_ratio_high"] = bool(
         evaluable and ratio is not None and ratio >= RATIO_NOTICE_MULTIPLE)
     computed["alerted_rate_ratio_notice"] = bool(
@@ -1626,10 +1513,9 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alerted_rate"] = round(alert_rate, 6)
     computed["alert_rate_bar"] = round(rate_bar, 4) if rate_bar is not None else None
     computed["alert_rate_bar_unreachable"] = bool(rate_bar is not None and rate_bar > 1.0)
-    # A prevalence above a half says most of the observation window was an incident. That is
-    # occasionally true and usually means the incident file is wrong. It also silently
-    # disables the flag-everything guard, so it has to be said at the top rather than left
-    # for a reader to work out from a bar above 1.
+    # A prevalence above a half says most of the observation window was an incident, which
+    # usually means the incident file is wrong. It also disables the flag-everything guard,
+    # so the report states it at the top.
     computed["implausible_prevalence"] = bool(
         both_classes and prevalence > IMPLAUSIBLE_PREVALENCE)
     computed["alert_duty_cycle"] = round(alert_duty, 6) if alert_duty is not None else None
@@ -1642,9 +1528,8 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["alerts_per_day"] = round(per_day, 2) if per_day is not None else None
     computed["incident_stretches"] = stretches
     computed["incident_rows_supplied"] = truth_rows
-    # The neighbouring guard says how close a call was and this had no equivalent, which
-    # matters more here because one real production stack landed at 49.47 against a limit
-    # of 50, missing it by about half an alert.
+    # Like the neighbouring guard, this says how close a call was, so a value just under the
+    # limit is visible as a near miss.
     computed["alert_volume_near_limit"] = bool(
         per_incident is not None
         and ALERTS_PER_INCIDENT_LIMIT * (1.0 - NEAR_BAR_BAND)
@@ -1662,25 +1547,18 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
     computed["low_recall"] = bool(evaluable and pm["recall"] < LOW_RECALL_NOTICE)
     computed["low_recall_notice"] = bool(computed["low_recall"] and not reasons)
     computed["low_recall_band"] = LOW_RECALL_NOTICE
-    # Both reviewers asked for this from opposite directions. One found a PASS carried by a
-    # suppressed exclusion, the other a PASS on a detector paging 174 times a day, and both
-    # said the same thing: the exit code carried none of it. A reader who only sees the code
-    # cannot tell a clean PASS from one with a caveat attached.
-    # Above a prevalence of 0.5 in alerts mode nothing is left that can fail a detector.
-    # The alert-rate guard's bar exceeds 1.0 and is unreachable. Section 8b needs recall at
-    # or above 0.95. There is no rank metric in alerts mode at all. And the predict-all floor
-    # is so high, 0.92 at a prevalence of 0.853, that F1 carries almost no information. A
-    # detector alerting on 88 percent of the timeline came back PASS at exit 0 with not one
-    # check firing. That is not a detector that passed, it is an input that cannot produce a
-    # verdict, so it is reported as one. An EXCLUDE still stands, because something firing is
-    # evidence either way.
-    # Two conditions, and both are needed. The guard has to be structurally unreachable,
-    # which happens above a prevalence of 0.5 where its bar exceeds an alerted rate of 1.0.
-    # And the detector has to sit near the predict-all floor, because that is where F1 has
-    # stopped separating a working detector from one that alerts on everything. A perfect
-    # detector at a prevalence of 0.6 scores a third above the floor and still passes, which
-    # is right. One scoring seven percent above it at a prevalence of 0.854 does not, because
-    # at that floor seven percent is not a measurement.
+    # A PASS carried by a suppressed exclusion or a high alert volume is qualified, so a
+    # reader who sees only the exit code can tell it from a plain PASS.
+    # Above a prevalence of 0.5 in alerts mode nothing can fail a detector. The alert-rate
+    # bar exceeds 1.0, section 8b needs recall at or above 0.95, alerts mode has no rank
+    # metric, and the predict-all floor is so high (0.92 at a prevalence of 0.853) that F1
+    # carries little information. Such a run is INSUFFICIENT. An EXCLUDE still stands,
+    # because a check that fired is evidence either way.
+    # Both conditions are needed: the guard unreachable, and the detector near the
+    # predict-all floor, where F1 no longer separates a working detector from one that
+    # alerts on everything. A perfect detector at a prevalence of 0.6 scores a third above
+    # the floor and still passes. One seven percent above it at a prevalence of 0.854 does
+    # not.
     cannot_pass = bool(mode == "alerts"
                        and computed.get("alert_rate_bar_unreachable")
                        and computed.get("near_floor"))
@@ -1705,9 +1583,7 @@ def run_check(*, mode: str, y: np.ndarray, pred: np.ndarray,
                        "where a rank metric is available.")})
     else:
         computed["verdict"] = "PASS"
-    # This is a statement about a PASS. It was set with no reference to the verdict, so
-    # every EXCLUDE carried it too and anyone reading the JSON instead of the exit code read
-    # an exclusion as a qualified pass.
+    # Qualification only applies to a PASS.
     computed["pass_qualified"] = bool(caveat and computed["verdict"] == "PASS")
     return computed, not_computed
 
@@ -1748,8 +1624,7 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
 
     alerted, a_span = mark_windows(grid, a_start, a_end)
     truth, i_span = mark_windows(grid, i_start, i_end)
-    # Bucket collision is not temporal overlap, and the coverage note reported the second as
-    # the first. Measure it on the raw times so the note can tell them apart.
+    # Bucket collision is not temporal overlap, so overlap is measured on the raw times.
     a_span["raw_overlap"] = raw_overlap(grid, a_start, a_end)
     i_span["raw_overlap"] = raw_overlap(grid, i_start, i_end)
 
@@ -1776,10 +1651,8 @@ def check_alerts(alerts_csv: Path, incidents_csv: Path, bucket: str,
     # INSUFFICIENT run has no verdict at any bucket size, so nothing is gained by asking
     # four more times.
     #
-    # It runs even under --no-sweep. That flag holds the verdict and the exit code at the
-    # bucket the user picked, and it used to do that by not looking, which meant a run that
-    # would have been UNSTABLE came back as a clean PASS at exit 0 with nothing said. The
-    # flag now suppresses the verdict change and says it suppressed it.
+    # It runs even under --no-sweep. That flag holds the verdict at the user's bucket, and the
+    # report still says when it suppressed a verdict change.
     if computed["verdict"] in ("PASS", "EXCLUDE"):
         sw = bucket_sweep(grid, a_start, a_end, a_note, i_start, i_end, i_note)
         sw["applied"] = bool(sweep)
@@ -1934,7 +1807,7 @@ def timestamp_assumptions(notes: list[dict], bucket_s: int) -> list[str]:
             z = n["zero_length_rows"]
             out.append(f"{n['file']}: {z} row(s) start and end at the same second. Those are "
                        f"instantaneous events and each marks the one bucket that contains "
-                       f"it. That is not an error. Real exports carry them, for example a "
+                       f"it. That is not an error. Exports carry them, for example a "
                        f"Watchdog story that emitted a single event. If you expected those "
                        f"rows to cover a span, the export lost the end time.")
     seen, unique = set(), []
@@ -2026,8 +1899,8 @@ def assemble(mode: str, grid: dict, computed: dict, not_computed: list[dict],
         "path": "bring your own data",
         "mode": mode,
         "verdict": computed["verdict"],
-        # Promoted out of results. A script branching on the verdict needs the caveat in the
-        # same place, and result["pass_qualified"] returned None while it was only nested.
+        # Copied to the top level next to the verdict, where a script branching on the verdict
+        # looks for it.
         "pass_qualified": computed.get("pass_qualified", False),
         "bucketing": grid,
         "inputs": inputs,
@@ -2240,8 +2113,7 @@ def sweep_notice(sweep: dict, grid: dict, verdict: str = "UNSTABLE") -> list[str
     """The block that replaces a single verdict when the bucket size chooses the verdict.
 
     Under --no-sweep the verdict is not replaced, so the block says that it was suppressed
-    and what it would have been. A flag that quietly turns an UNSTABLE into a PASS at exit
-    zero is worse than no flag.
+    and what it would have been.
     """
     at = {v: [r["bucket"] for r in sweep["buckets"] if r["verdict"] == v]
           for v in sweep["verdicts"]}
@@ -2339,8 +2211,8 @@ def dominant_incident_notice(res: dict) -> list[str]:
         without = c.get("prevalence_without_long_rows")
         if without is not None:
             lines.append(
-                f"Nobody spends {fmt_span(max(r['seconds_in_range'] for r in rows))} inside "
-                f"one incident. A row that long is usually a ticket nobody closed. Without "
+                f"A row lasting {fmt_span(max(r['seconds_in_range'] for r in rows))} is usually "
+                f"a ticket nobody closed. Without "
                 f"{'it' if len(rows) == 1 else 'them'} prevalence would be "
                 f"{_fmt(without, 4)} instead of {_fmt(res['prevalence'], 4)}.")
         lines.append(
@@ -2437,7 +2309,7 @@ SCOPE_ECHO_CAUTION = (
 
 
 def incident_overlap_notice(scope: dict) -> str:
-    """The other direction, and it fails the other way.
+    """Incidents on a scope that no alert covers.
 
     Alerts on a scope with no incident are guaranteed false positives. Incidents on a scope
     no alert covers are guaranteed false negatives: nothing in the alert file could ever have

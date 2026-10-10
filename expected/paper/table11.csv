@@ -1,0 +1,19 @@
+row,column,value
+metrics|RF,F1,0.848 ± 0.007
+metrics|RF,AUC-ROC,0.985 ± 0.002
+metrics|RF,PR-AUC,0.989 ± 0.001
+metrics|DAGMM,F1,0.923 ± 0.042
+metrics|DAGMM,AUC-ROC,0.959 ± 0.040
+metrics|DAGMM,PR-AUC,0.976 ± 0.020
+logs|RF,F1,0.843 ± 0.005
+logs|RF,AUC-ROC,0.907 ± 0.005
+logs|RF,PR-AUC,0.926 ± 0.003
+logs|DAGMM,F1,0.858 ± 0.033
+logs|DAGMM,AUC-ROC,0.889 ± 0.042
+logs|DAGMM,PR-AUC,0.911 ± 0.030
+traces|RF,F1,0.487 ± 0.008
+traces|RF,AUC-ROC,0.670 ± 0.008
+traces|RF,PR-AUC,0.620 ± 0.009
+traces|DAGMM,F1,0.852 ± 0.058
+traces|DAGMM,AUC-ROC,0.900 ± 0.066
+traces|DAGMM,PR-AUC,0.894 ± 0.061

@@ -1,0 +1,33 @@
+row,column,value
+IsolationForest,Metrics,4.1 ± 0.6 min
+IsolationForest,Logs,27.6 ± 2.7 s
+IsolationForest,Traces,29.6 ± 2.5 s
+IsolationForest,Total,5.1 min
+OneClassSVM,Metrics,47.0 ± 0.5 s
+OneClassSVM,Logs,13.3 ± 0.7 s
+OneClassSVM,Traces,18.9 ± 1.3 s
+OneClassSVM,Total,1.3 min
+LSTM_AE,Metrics,87.4 ± 6.9 min
+LSTM_AE,Logs,14.2 ± 1.8 min
+LSTM_AE,Traces,15.6 ± 2.0 min
+LSTM_AE,Total,117.2 min
+Transformer_AE,Metrics,93.8 ± 30.1 min
+Transformer_AE,Logs,35.9 ± 4.4 min
+Transformer_AE,Traces,39.0 ± 2.3 min
+Transformer_AE,Total,168.8 min
+CNN1D_AE,Metrics,16.3 ± 1.8 min
+CNN1D_AE,Logs,9.8 ± 0.9 min
+CNN1D_AE,Traces,15.1 ± 2.5 min
+CNN1D_AE,Total,41.2 min
+LSTM_VAE,Metrics,35.9 ± 2.1 min
+LSTM_VAE,Logs,9.9 ± 0.5 min
+LSTM_VAE,Traces,8.8 ± 1.0 min
+LSTM_VAE,Total,54.6 min
+DEEP_SVDD,Metrics,42.7 ± 1.7 min
+DEEP_SVDD,Logs,6.3 ± 0.6 min
+DEEP_SVDD,Traces,7.4 ± 0.3 min
+DEEP_SVDD,Total,56.4 min
+DAGMM,Metrics,44.8 ± 3.2 min
+DAGMM,Logs,5.5 ± 0.6 min
+DAGMM,Traces,7.0 ± 1.1 min
+DAGMM,Total,57.3 min

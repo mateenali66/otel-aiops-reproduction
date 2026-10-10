@@ -32,7 +32,7 @@ RANDOM_AUC_REFERENCE = 0.5      # section 7, ROC family
 FLOOR_MARGIN = 0.05             # section 8b, "stated margin" used by this package (5 percent)
 RECALL_SATURATION = 0.95        # section 8b, "recall near saturation"
 ALERT_RATE_PRODUCT = 2.0        # section 8b read on the alerted rate, see alert_rate_saturated
-ALERT_RATE_MULTIPLE = 4.0       # not a guard constant. the ratio worth printing, see byod
+ALERT_RATE_MULTIPLE = 4.0       # not a guard constant, the ratio worth printing, see byod
 DEGENERATE_AUC = 0.55           # article rule (Table 12)
 DEGENERATE_F1_RATIO = 0.95      # article rule (Table 12)
 
@@ -82,50 +82,33 @@ def flag_everything(f1: float, recall: float, floor: float) -> bool:
 def alert_rate_saturated(alerted_rate: float, prevalence: float) -> bool:
     """Section 8b read on the alerted rate: is this detector flagging nearly everything?
 
-    The F1 form of section 8b above compares one number against another number computed
-    from the same prevalence, so a detector can sit a rounding-level distance outside the
-    margin and escape it. A detector that alerted on 94.5 percent of the timeline at a
-    prevalence of 0.043 scores F1 0.087 against a floor of 0.082, which is 5.6 percent
-    above the floor and so lands just outside a 5 percent margin. Nothing else excluded it.
+    The F1 form of section 8b compares two numbers computed from the same prevalence, so a
+    detector can sit a rounding-level distance outside the margin. At a prevalence of 0.043 a
+    detector alerting on 94.5 percent of the timeline scores F1 0.087 against a floor of
+    0.082, which is 5.6 percent above the floor and just outside a 5 percent margin.
 
-    The alerted rate against prevalence separates the two cases the F1 form confuses. A
-    detector that works alerts about as often as things are actually anomalous, so its
-    alerted rate sits near prevalence. A detector that flags everything alerts far more
-    often than anything is wrong.
+    The alerted rate against prevalence separates the cases the F1 form confuses. A working
+    detector alerts about as often as things are anomalous, so its alerted rate sits near
+    prevalence. A detector that flags everything alerts far more often than anything is wrong.
 
-    The rule is one line. The guard fires when the alerted rate squared reaches
-    ALERT_RATE_PRODUCT (2) times prevalence. Since the alerted rate over prevalence equals
-    recall over precision, that is the same as saying the alerted rate multiplied by its
-    ratio to prevalence reaches 2. A detector may alert often, or it may alert far more
-    often than incidents occur. It may not do both.
+    The guard fires when the alerted rate squared reaches ALERT_RATE_PRODUCT (2) times
+    prevalence. Since the alerted rate over prevalence equals recall over precision, that is
+    the alerted rate multiplied by its ratio to prevalence reaching 2. A detector may alert
+    often, or far more often than incidents occur, but not both.
 
-    Why a curve and not a pair of thresholds. This started as one condition, then two, and
-    both shapes had the same defect. A threshold that is constant in prevalence has a flat
-    region, and inside that region the constant decides alone while the ratio never binds.
-    The two-path version narrowed the flat regions without removing them: at a prevalence
-    of 0.002 a detector alerting a hundred times more often than anything was wrong still
-    passed, because 0.20 was an absolute floor and nothing else could reach it. It also put
-    a step at every kink, so a detector could cross from PASS to EXCLUDE on a rounding-level
-    move in prevalence, which made bucket sweeps read as unstable for a reason that had
-    nothing to do with the detector.
+    It is a curve because any threshold that is constant in prevalence has a flat region,
+    where the constant decides alone and the ratio never binds, and a step at each kink,
+    where a rounding-level move in prevalence can flip the verdict. The curve passes through
+    0.20 at a prevalence of 0.02 and 0.50 at 0.125, and moves with prevalence everywhere.
 
-    The curve keeps the two anchors the threshold design had already chosen, and joins
-    them instead of stepping between them. At a prevalence of 0.02 the bar is 0.20 and at
-    0.125 it is 0.50, which is exactly where the old floors sat. Everywhere else it
-    interpolates, so the ratio always binds and the bar always moves with prevalence.
+    A perfect detector has an alerted rate equal to prevalence, so it fires only at a
+    prevalence of 2, which cannot happen. The bar also stays stricter than the predict-all
+    baseline: at full recall the guard fires below a precision of sqrt(prevalence / 2), which
+    is above prevalence, the precision predict-all achieves, for every prevalence under 0.5.
 
-    The safety property is unchanged and is now provable rather than tested. A perfect
-    detector has an alerted rate equal to prevalence, so it fires only when prevalence
-    squared reaches twice prevalence, meaning a prevalence of 2, which cannot happen. A
-    perfect detector cannot be caught here at any prevalence.
-
-    The bar also stays stricter than the predict-all baseline it exists to catch. At full
-    recall the guard fires below a precision of sqrt(prevalence / 2), and that is above
-    prevalence, which is the precision predict-all achieves, for every prevalence under 0.5.
-
-    Rare incidents are still protected. At a prevalence of 0.001 the bar is 0.045, so a
-    detector alerting on 1 percent of the time with perfect recall is ten times prevalence
-    and comfortably clear of it. What it no longer permits is a ratio of two hundred.
+    At a prevalence of 0.001 the bar is 0.045, so a detector alerting on 1 percent of the
+    time with perfect recall, ten times prevalence, clears it, and a ratio of two hundred
+    does not.
     """
     return bool(alerted_rate * alerted_rate >= ALERT_RATE_PRODUCT * float(prevalence))
 

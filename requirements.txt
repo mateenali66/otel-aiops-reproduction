@@ -4,7 +4,9 @@
 numpy==1.26.4
 pandas==2.2.3
 pyarrow==17.0.0
-scikit-learn==1.5.2
+# The archived results were produced with scikit-learn 1.6 or later. Version 1.5.2 builds a
+# different Isolation Forest on metrics and traces for the same seed and hyperparameters.
+scikit-learn==1.6.1
 scipy==1.13.1
 optuna==4.1.0
 # torch: CPU build. On Linux install with

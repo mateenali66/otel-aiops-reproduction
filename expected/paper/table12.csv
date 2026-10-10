@@ -1,0 +1,28 @@
+row,column,value
+DAGMM|metrics,AUC (excl.),0.960
+DAGMM|metrics,AUC (incl.),0.959
+DAGMM|metrics,Norm. PR lift,0.942 ± 0.061
+DAGMM|traces,AUC (excl.),0.897
+DAGMM|traces,AUC (incl.),0.900
+DAGMM|traces,Norm. PR lift,0.821 ± 0.136
+DAGMM|logs,AUC (excl.),0.889
+DAGMM|logs,AUC (incl.),0.888
+DAGMM|logs,Norm. PR lift,0.795 ± 0.108
+DEEP_SVDD|traces,AUC (excl.),0.883
+DEEP_SVDD|traces,AUC (incl.),0.886
+DEEP_SVDD|traces,Norm. PR lift,0.782 ± 0.099
+DEEP_SVDD|metrics,AUC (excl.),0.776
+DEEP_SVDD|metrics,AUC (incl.),0.774
+DEEP_SVDD|metrics,Norm. PR lift,0.551 ± 0.409
+Transformer_AE|traces,AUC (excl.),0.800
+Transformer_AE|traces,AUC (incl.),0.800
+Transformer_AE|traces,Norm. PR lift,0.704 ± 0.284
+IsolationForest|logs,AUC (excl.),0.640
+IsolationForest|logs,AUC (incl.),0.638
+IsolationForest|logs,Norm. PR lift,0.299 ± 0.014
+LSTM_AE|metrics,AUC (excl.),0.207
+LSTM_AE|metrics,AUC (incl.),0.209
+LSTM_AE|metrics,Norm. PR lift,-0.170 ± 0.022
+LSTM_VAE|metrics,AUC (excl.),0.171
+LSTM_VAE|metrics,AUC (incl.),0.172
+LSTM_VAE|metrics,Norm. PR lift,-0.287 ± 0.001

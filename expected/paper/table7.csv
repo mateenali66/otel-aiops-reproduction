@@ -1,0 +1,89 @@
+row,column,value
+Net Delay 100ms,IsolationForest,0.825
+Net Delay 100ms,OneClassSVM,1.000
+Net Delay 100ms,LSTM_AE,1.000
+Net Delay 100ms,Transformer_AE,0.725
+Net Delay 100ms,CNN1D_AE,0.865
+Net Delay 100ms,LSTM_VAE,1.000
+Net Delay 100ms,DEEP_SVDD,0.793
+Net Delay 100ms,DAGMM,0.772
+Net Delay 500ms,IsolationForest,0.838
+Net Delay 500ms,OneClassSVM,1.000
+Net Delay 500ms,LSTM_AE,1.000
+Net Delay 500ms,Transformer_AE,0.733
+Net Delay 500ms,CNN1D_AE,0.860
+Net Delay 500ms,LSTM_VAE,1.000
+Net Delay 500ms,DEEP_SVDD,0.804
+Net Delay 500ms,DAGMM,0.814
+Net Delay 1000ms,IsolationForest,0.850
+Net Delay 1000ms,OneClassSVM,0.996
+Net Delay 1000ms,LSTM_AE,1.000
+Net Delay 1000ms,Transformer_AE,0.725
+Net Delay 1000ms,CNN1D_AE,0.850
+Net Delay 1000ms,LSTM_VAE,1.000
+Net Delay 1000ms,DEEP_SVDD,0.804
+Net Delay 1000ms,DAGMM,0.838
+HTTP 500 Error,IsolationForest,0.889
+HTTP 500 Error,OneClassSVM,0.998
+HTTP 500 Error,LSTM_AE,1.000
+HTTP 500 Error,Transformer_AE,0.763
+HTTP 500 Error,CNN1D_AE,0.874
+HTTP 500 Error,LSTM_VAE,1.000
+HTTP 500 Error,DEEP_SVDD,0.798
+HTTP 500 Error,DAGMM,0.717
+CPU Stress 80%,IsolationForest,0.813
+CPU Stress 80%,OneClassSVM,0.998
+CPU Stress 80%,LSTM_AE,1.000
+CPU Stress 80%,Transformer_AE,0.731
+CPU Stress 80%,CNN1D_AE,0.867
+CPU Stress 80%,LSTM_VAE,1.000
+CPU Stress 80%,DEEP_SVDD,0.782
+CPU Stress 80%,DAGMM,0.761
+Mem Stress 80%,IsolationForest,0.802
+Mem Stress 80%,OneClassSVM,0.983
+Mem Stress 80%,LSTM_AE,1.000
+Mem Stress 80%,Transformer_AE,0.745
+Mem Stress 80%,CNN1D_AE,0.847
+Mem Stress 80%,LSTM_VAE,1.000
+Mem Stress 80%,DEEP_SVDD,0.804
+Mem Stress 80%,DAGMM,0.835
+Cascade OTel Cat+Rec,IsolationForest,0.815
+Cascade OTel Cat+Rec,OneClassSVM,0.995
+Cascade OTel Cat+Rec,LSTM_AE,1.000
+Cascade OTel Cat+Rec,Transformer_AE,0.737
+Cascade OTel Cat+Rec,CNN1D_AE,0.848
+Cascade OTel Cat+Rec,LSTM_VAE,1.000
+Cascade OTel Cat+Rec,DEEP_SVDD,0.792
+Cascade OTel Cat+Rec,DAGMM,0.821
+Cascade OTel Chk+Pay,IsolationForest,0.836
+Cascade OTel Chk+Pay,OneClassSVM,1.000
+Cascade OTel Chk+Pay,LSTM_AE,1.000
+Cascade OTel Chk+Pay,Transformer_AE,0.744
+Cascade OTel Chk+Pay,CNN1D_AE,0.636
+Cascade OTel Chk+Pay,LSTM_VAE,1.000
+Cascade OTel Chk+Pay,DEEP_SVDD,0.823
+Cascade OTel Chk+Pay,DAGMM,0.752
+Cascade SS Cat+Ord,IsolationForest,0.800
+Cascade SS Cat+Ord,OneClassSVM,1.000
+Cascade SS Cat+Ord,LSTM_AE,1.000
+Cascade SS Cat+Ord,Transformer_AE,0.400
+Cascade SS Cat+Ord,CNN1D_AE,0.200
+Cascade SS Cat+Ord,LSTM_VAE,1.000
+Cascade SS Cat+Ord,DEEP_SVDD,0.933
+Cascade SS Cat+Ord,DAGMM,0.933
+Cascade SS FE+Cart,IsolationForest,0.877
+Cascade SS FE+Cart,OneClassSVM,1.000
+Cascade SS FE+Cart,LSTM_AE,1.000
+Cascade SS FE+Cart,Transformer_AE,0.741
+Cascade SS FE+Cart,CNN1D_AE,1.000
+Cascade SS FE+Cart,LSTM_VAE,1.000
+Cascade SS FE+Cart,DEEP_SVDD,0.910
+Cascade SS FE+Cart,DAGMM,0.660
+Average,IsolationForest,0.834
+Average,OneClassSVM,0.997
+Average,LSTM_AE,1.000
+Average,Transformer_AE,0.704
+Average,CNN1D_AE,0.785
+Average,LSTM_VAE,1.000
+Average,DEEP_SVDD,0.824
+Average,DAGMM,0.790
