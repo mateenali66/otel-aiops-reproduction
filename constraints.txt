@@ -1,0 +1,31 @@
+# Exact versions of every package the pinned requirements pull in, recorded from a working
+# install on 2026-11-24 (Python 3.11.18). requirements.txt pins the nine packages the code
+# imports; this file pins the rest, so an install made years from now gets the same set.
+#   pip install -r requirements.txt -c constraints.txt
+alembic==1.20.1
+cloudpickle==3.1.3
+colorlog==6.12.0
+contourpy==1.3.3
+cycler==0.12.1
+filelock==4.3.1
+fonttools==4.68.0
+fsspec==2026.9.0
+jinja2==3.1.6
+joblib==1.6.0
+kiwisolver==1.5.1
+mako==1.4.3
+markupsafe==3.0.4
+mpmath==1.3.0
+networkx==3.6.1
+packaging==26.4
+pillow==13.0.0
+pyparsing==3.3.3
+python-dateutil==4.0.0
+pytz==2026.6
+pyyaml==6.0.4
+sqlalchemy==2.1.9
+sympy==1.13.1
+threadpoolctl==3.8.0
+tqdm==4.70.1
+typing-extensions==4.16.0
+tzdata==2026.6

@@ -1,0 +1,51 @@
+{
+  "n_signals_analyzed": 3,
+  "separability_metrics": [
+    {
+      "signal_type": "metrics",
+      "n_features": 64,
+      "n_anomalous": 309848,
+      "n_normal": 222219,
+      "fisher_mean": 0.0003911492860247262,
+      "fisher_max": 0.002980401882754257,
+      "fisher_top5_mean": 0.0023349209353889376,
+      "silhouette": -0.007360134273767471,
+      "distance_ratio": 0.1643005907535553
+    },
+    {
+      "signal_type": "logs",
+      "n_features": 5,
+      "n_anomalous": 41041,
+      "n_normal": 31629,
+      "fisher_mean": 0.002794645027463524,
+      "fisher_max": 0.008471173004066138,
+      "fisher_top5_mean": 0.002794645027463524,
+      "silhouette": -0.0008402839885093272,
+      "distance_ratio": 0.20445242524147034
+    },
+    {
+      "signal_type": "traces",
+      "n_features": 11,
+      "n_anomalous": 30579,
+      "n_normal": 42279,
+      "fisher_mean": 0.00041691721164694427,
+      "fisher_max": 0.004117130571133866,
+      "fisher_top5_mean": 0.000896498814051153,
+      "silhouette": 0.006311357952654362,
+      "distance_ratio": 0.09377726167440414
+    }
+  ],
+  "n_recon_mse_rows": 120,
+  "outputs": [
+    "feature_importance_logs.csv",
+    "feature_importance_metrics.csv",
+    "feature_importance_traces.csv",
+    "recon_mse_distribution.csv",
+    "recon_mse_distribution_summary.csv",
+    "separability_metrics.csv",
+    "summary.json",
+    "tsne_embedding_logs.npz",
+    "tsne_embedding_metrics.npz",
+    "tsne_embedding_traces.npz"
+  ]
+}

@@ -13,7 +13,9 @@ Subcommands
   check           run the FDES checks against your own alert or score CSVs. Needs no Zenodo
                   artifact and no detector plugin
   merge           join runs made one slice at a time (--folds, --models) into one run
-  paper-tables    the article's Tables 4 to 12 (Table 9 aside) from one results directory
+  paper           every table and figure of the article from the archived scores, without
+                  training, each printed cell checked against the article
+  paper-tables    the article's Tables 4 to 16 from one results directory
   figures         the article's Figures 2 to 7 from one results directory
 
 Exit codes
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -48,11 +51,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# The artifact's own scripts are imported from data/, and their bytecode would land there.
+sys.dont_write_bytecode = True
 
 ZENODO_RECORD = "22078287"
 ZENODO_DOI = "10.5281/zenodo.22078287"
 ZENODO_FILE = "otel-aiops-benchmark.zip"
+EXTERNAL_FILE = "paper5_external_validity_code_v3.1.1.zip"
 DATA_DIR = ROOT / "data" / "zenodo"
+EXTERNAL_ROOT = DATA_DIR / "external-validity"
+EXTERNAL_DIR = EXTERNAL_ROOT / "data" / "analysis-results" / "external-validity"
 ARTIFACT_DIR = DATA_DIR / "otel-aiops-benchmark"
 FEATURES_DIR = ARTIFACT_DIR / "data" / "features"
 PIPELINE_DIR = ARTIFACT_DIR / "code" / "pipeline"
@@ -96,9 +104,26 @@ def require_artifact() -> None:
         sys.exit(f"artifact not found under {ARTIFACT_DIR}; run `make fetch` first")
 
 
+PACKAGES = ["numpy", "pandas", "scikit-learn", "scipy", "optuna", "torch", "pyarrow",
+            "matplotlib", "seaborn"]
+
+
+def package_versions() -> dict[str, str]:
+    from importlib import metadata
+    out = {}
+    for name in PACKAGES:
+        try:
+            out[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            out[name] = "not installed"
+    return out
+
+
 def hardware() -> dict:
-    info = {"platform": platform.platform(), "machine": platform.machine(),
-            "python": platform.python_version(), "cpu_count": os.cpu_count()}
+    from fdes import TOOL_VERSION
+    info = {"tool_version": TOOL_VERSION, "platform": platform.platform(),
+            "machine": platform.machine(), "python": platform.python_version(),
+            "cpu_count": os.cpu_count(), "packages": package_versions()}
     try:
         import torch
         info["torch"] = torch.__version__
@@ -236,43 +261,54 @@ def cap_deep_epochs(training, max_epochs: int) -> None:
 
 # --------------------------------------------------------------------------- fetch
 
-def cmd_fetch(args) -> None:
+def download(name: str, url: str, target: Path, hint: str) -> None:
     import urllib.error
     import urllib.request
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"downloading {url}")
+    # Zenodo returns 502 and 504 from time to time, so the download is retried.
+    for attempt in range(1, 6):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r, open(target, "wb") as f:
+                while chunk := r.read(1 << 20):
+                    f.write(chunk)
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == 5:
+                sys.exit(f"download failed after 5 attempts: {e}. Download {name} by hand "
+                         f"and run `make fetch {hint}=path/to/{name}`")
+            log(f"  attempt {attempt} failed ({e}); retrying in {15 * attempt} s")
+            time.sleep(15 * attempt)
+
+
+def fetch_file(name: str, local_zip: str | None, hint: str) -> Path:
+    """One file of the Zenodo record, downloaded or copied, and checked against its md5."""
     sums = load_checksums()
-    expected_md5 = sums["files"][ZENODO_FILE]["md5"]
-    target = DATA_DIR / ZENODO_FILE
-    if args.from_zip:
-        src = Path(args.from_zip)
-        log(f"using local zip {src}")
-        target.write_bytes(src.read_bytes())
+    expected_md5 = sums["files"][name]["md5"]
+    target = DATA_DIR / name
+    if local_zip:
+        log(f"using local zip {local_zip}")
+        target.write_bytes(Path(local_zip).read_bytes())
     elif target.exists() and md5sum(target) == expected_md5:
         log(f"{target} already present with the expected md5")
     else:
-        url = f"https://zenodo.org/api/records/{ZENODO_RECORD}/files/{ZENODO_FILE}/content"
-        log(f"downloading {url}")
-        # Zenodo returns 502 and 504 from time to time, so the download is retried.
-        for attempt in range(1, 6):
-            try:
-                with urllib.request.urlopen(url, timeout=120) as r, open(target, "wb") as f:
-                    while chunk := r.read(1 << 20):
-                        f.write(chunk)
-                break
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                if attempt == 5:
-                    sys.exit(f"download failed after 5 attempts: {e}. Download the zip by hand "
-                             f"and run `make fetch FROM_ZIP=path/to/{ZENODO_FILE}`")
-                log(f"  attempt {attempt} failed ({e}); retrying in {15 * attempt} s")
-                time.sleep(15 * attempt)
+        download(name, f"https://zenodo.org/api/records/{ZENODO_RECORD}/files/{name}/content", target, hint)
     actual = md5sum(target)
     if actual != expected_md5:
-        sys.exit(f"CHECKSUM MISMATCH for {ZENODO_FILE}: expected md5 {expected_md5}, got {actual}")
-    log(f"md5 verified: {actual} ({ZENODO_DOI}, record version {sums['record_version']})")
-    with zipfile.ZipFile(target) as z:
+        sys.exit(f"CHECKSUM MISMATCH for {name}: expected md5 {expected_md5}, got {actual}")
+    log(f"md5 verified: {actual} ({ZENODO_DOI}, record version {sums['record_version']}, {name})")
+    return target
+
+
+def cmd_fetch(args) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(fetch_file(ZENODO_FILE, args.from_zip, "FROM_ZIP")) as z:
         z.extractall(DATA_DIR)
     require_artifact()
     log(f"unpacked to {ARTIFACT_DIR}")
+    # The second file of the record holds the external-validity results behind Table 16.
+    with zipfile.ZipFile(fetch_file(EXTERNAL_FILE, args.from_external_zip, "FROM_EXTERNAL_ZIP")) as z:
+        z.extractall(EXTERNAL_ROOT)
+    log(f"unpacked to {EXTERNAL_ROOT}")
 
 
 # --------------------------------------------------------------------------- runs
@@ -312,15 +348,19 @@ def cmd_run(args) -> None:
     if cfg["max_epochs"] is not None:
         cap_deep_epochs(training, cfg["max_epochs"])
     t0 = time.time()
-    fold_dirs = []
     for fold in cfg["folds"]:
         fd = out_dir / f"fold{fold}"
         training.run_training(FEATURES_DIR, fd / "results", fd / "models", single_fold=fold)
-        fold_dirs.append(fd)
     wall = time.time() - t0
+    fold_dirs, skipped = fold_dirs_to_merge(out_dir, cfg["models"], cfg["signals"])
     merge_runs(out_dir, fold_dirs)
+    merged_folds = [int(d.name[4:]) for d in fold_dirs]
+    log(f"\n{out_dir / 'results'} now holds fold(s) {merged_folds}")
+    for s in skipped:
+        log(f"  not merged: {s}")
     manifest = {
-        "label": cfg["label"], "signals": cfg["signals"], "models": cfg["models"], "folds": cfg["folds"],
+        "label": cfg["label"], "signals": cfg["signals"], "models": cfg["models"], "folds": merged_folds,
+        "folds_trained_by_this_call": cfg["folds"],
         "n_trials_classical": cfg["n_trials_classical"], "n_trials_deep": cfg["n_trials_deep"],
         "max_epochs_deep": cfg["max_epochs"], "wall_clock_s": round(wall, 1),
         "seed_policy": "base 42 + fold id (random, numpy, torch), reset before each signal and "
@@ -339,6 +379,30 @@ def cmd_run(args) -> None:
     log(f"\n{cfg['label']}: wall clock {wall/60:.1f} min; tables written: {manifest['tables']['written']}")
     for s in manifest["tables"]["skipped"]:
         log(f"  skipped: {s}")
+
+
+def fold_dirs_to_merge(out_dir: Path, models: list[str], signals: list[str]) -> tuple[list[Path], list[str]]:
+    """The fold<k> directories under out_dir to merge into out_dir/results, in fold order.
+
+    The README runs `make reproduce FOLDS=k` once per fold into the same --out, so the merge
+    has to take the folds trained by earlier calls as well as this one. A fold directory
+    holding a model or signal outside this run is left out, and the reason is returned.
+    """
+    import pandas as pd
+    found = [d for d in out_dir.glob("fold*") if d.is_dir() and d.name[4:].isdigit()]
+    keep, skipped = [], []
+    for d in sorted(found, key=lambda d: int(d.name[4:])):
+        mr = d / "results" / "model_results.csv"
+        if not mr.exists():
+            skipped.append(f"{d.name}: no results/model_results.csv")
+            continue
+        df = pd.read_csv(mr)
+        extra = sorted((set(df["model"]) - set(models)) | (set(df["signal_type"]) - set(signals)))
+        if extra:
+            skipped.append(f"{d.name}: holds {', '.join(extra)}, which this run does not cover")
+            continue
+        keep.append(d)
+    return keep, skipped
 
 
 def merge_runs(out: Path, parts: list[Path]) -> None:
@@ -469,10 +533,81 @@ def resolve_results(spec: str, out: str | None) -> tuple[Path, Path]:
     return results, Path(out) if out else results.parent / "paper"
 
 
+def cmd_paper(args) -> None:
+    """The article's tables and figures from the Zenodo deposit, without training.
+
+    1. Rebuild every per-fold result (metrics, cooldown-included metrics, late fusion,
+       per-fault recall) from the archived raw scores with the artifact's own training.py,
+       and compare each value with the archived CSV.
+    2. Build Tables 4 to 16 and Figures 2 to 15 from the rebuilt results, the deposited
+       result files and supplement/, recomputing every score-based analysis.
+    3. Compare every printed cell with the article. Exit 0 only if each one matches or is
+       listed, with its reason, in expected/paper/exceptions.csv.
+    """
+    from fdes.paper import verdict, write_figures, write_paper_tables
+    from fdes.rebuild import rebuild
+    require_artifact()
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    report = []
+
+    def say(line: str) -> None:
+        report.append(line)
+        log(line)
+
+    from fdes import TOOL_VERSION
+    say(f"make paper: the article's tables and figures from {ZENODO_DOI}, without training "
+        f"(otel-aiops-reproduction {TOOL_VERSION}, Python {platform.python_version()})")
+    results, lines, diffs = rebuild(ARTIFACT_DIR, out)
+    for line in lines:
+        say(line)
+    say(f"  every archived per-fold value reproduced: {'yes' if not diffs else f'NO, {len(diffs)} differences'}")
+    for d in diffs[:40]:
+        say(f"    {d}")
+    diff_file = out / "rebuild_differences.txt"
+    if diffs:
+        diff_file.write_text("".join(f"{d}\n" for d in diffs))
+    elif diff_file.exists():
+        diff_file.unlink()
+    for line in write_paper_tables(results, out, ARTIFACT_DIR, external_dir=EXTERNAL_DIR,
+                                   supervised_from_archive=True):
+        # The report keeps each table's count and every cell that differs, with both values.
+        if ("printed cells match" in line or line.lstrip().startswith(("differs", "missing"))
+                or ": skipped," in line):
+            say(line)
+        else:
+            log(line)
+    from fdes.paper import rf_rerun_report
+    for line in rf_rerun_report(ARTIFACT_DIR, out / "analysis"):
+        say(line)
+    for line in write_figures(results, out):
+        log(line)
+    from fdes.figures_extra import write_extra_figures
+    lines, fig_diffs = write_extra_figures(ARTIFACT_DIR, out)
+    for line in lines:
+        say(line)
+    ok, lines = verdict(out / "tables" / "comparison.csv", EXPECTED_DIR / "paper", annotate=True)
+    for line in lines:
+        say(line)
+    passed = ok and not diffs and not fig_diffs
+    say(f"RESULT: {'PASS' if passed else 'FAIL'}")
+    (out / "paper_report.txt").write_text("\n".join(report) + "\n")
+    sums = load_checksums()
+    (out / "paper_manifest.json").write_text(json.dumps({
+        "command": "make paper", "result": "PASS" if passed else "FAIL",
+        "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "artifact": {"doi": ZENODO_DOI, "record_version": sums["record_version"],
+                     "files": {k: v["md5"] for k, v in sums["files"].items()}},
+        "hardware": hardware(),
+    }, indent=2) + "\n")
+    log(f"report: {out / 'paper_report.txt'}")
+    sys.exit(0 if passed else 1)
+
+
 def cmd_paper_tables(args) -> None:
     from fdes.paper import write_paper_tables
     results, out = resolve_results(args.results, args.out)
-    for line in write_paper_tables(results, out, ARTIFACT_DIR):
+    for line in write_paper_tables(results, out, ARTIFACT_DIR, external_dir=EXTERNAL_DIR):
         log(line)
 
 
@@ -493,7 +628,6 @@ def parse_folds(spec: str) -> list[int]:
 # --------------------------------------------------------------------------- verify
 
 TOL_CLASSICAL = 0.02      # abs tolerance on per-fold metrics for models run at the published budget
-TOL_DEEP_MIN = 0.05       # deep models: max(0.05, 2 x published std) on mean F1 and AUC-ROC
 
 
 def cmd_verify(args) -> None:
@@ -504,8 +638,6 @@ def cmd_verify(args) -> None:
     manifest = json.loads((out / "run_manifest.json").read_text())
     got = pd.read_csv(out / "results" / "model_results.csv")
     exp_fold = pd.read_csv(EXPECTED_DIR / "model_results_per_fold.csv")
-    exp_t4 = pd.read_csv(EXPECTED_DIR / "table4_single_signal.csv")
-    exp_bc = json.loads((EXPECTED_DIR / "below_chance.json").read_text())
 
     def cmp(label, a, b, tol):
         ok = abs(a - b) <= tol
@@ -532,44 +664,18 @@ def cmd_verify(args) -> None:
                 notes.append(f"ok   {m} (reduced budget, structural only): F1 {float(g.f1_score.iloc[0]):.3f} "
                              f"AUC {float(g.auc_roc.iloc[0]):.3f} FDES verdict {v}; not compared numerically")
     else:
-        t4 = pd.read_csv(out / "tables" / "table4_single_signal.csv")
-        for r in t4.itertuples(index=False):
-            e = exp_t4[(exp_t4.model == r.model) & (exp_t4.signal_type == r.signal_type)]
-            if len(e) != 1:
-                failures.append(f"FAIL {r.model}/{r.signal_type}: no expected row")
-                continue
-            e = e.iloc[0]
-            classical = r.model in ("IsolationForest", "OneClassSVM")
-            for col in ("f1_score", "auc_roc"):
-                tol = TOL_CLASSICAL if classical else max(TOL_DEEP_MIN, 2 * float(e[f"{col}_std"]))
-                cmp(f"{r.model}/{r.signal_type}/{col}_mean", float(getattr(r, f"{col}_mean")), float(e[f"{col}_mean"]), tol)
-        complete = set(t4.model) == set(ALL_MODELS) and set(t4.signal_type) == set(ALL_SIGNALS)
-        bc = json.loads((out / "tables" / "below_chance.json").read_text())
-        if complete:
-            if bc["models_below_chance"] != exp_bc["models_below_chance"]:
-                failures.append(f"FAIL below-chance set: got {bc['models_below_chance']} expected {exp_bc['models_below_chance']}")
-            else:
-                notes.append(f"ok   below-chance set {bc['models_below_chance']} = {bc['n_below_chance']}/{bc['n_models_evaluated']} "
-                             f"({bc['fraction_below_chance']*100:.1f}%)")
-            fr_path = out / "tables" / "friedman_ranking.csv"
-            if fr_path.exists():
-                fr = pd.read_csv(fr_path)
-                exp_fr = pd.read_csv(EXPECTED_DIR / "friedman_ranking.csv")
-                for sig in ALL_SIGNALS:
-                    g_top = fr[fr.signal_type == sig].sort_values("mean_rank").model.iloc[0]
-                    e_top = exp_fr[exp_fr.signal_type == sig].sort_values("mean_rank").model.iloc[0]
-                    p = float(fr[fr.signal_type == sig].friedman_p.iloc[0])
-                    if g_top != e_top or p >= 0.05:
-                        failures.append(f"FAIL Friedman {sig}: top-ranked {g_top} (p={p:.4f}) expected {e_top} with p < 0.05")
-                    else:
-                        notes.append(f"ok   Friedman {sig}: top-ranked {g_top}, p={p:.4f}")
-            else:
-                failures.append("FAIL friedman_ranking.csv missing from a complete run")
-        else:
-            notes.append("partial run: below-chance count and Friedman ranks are checked only on a complete 8x3x5 run")
+        # Any set of folds. fdes/retrain_check.py says what a retrain is held to and why.
+        from fdes.retrain_check import check
+        fr_path = out / "tables" / "friedman_ranking.csv"
+        n, f = check(got, exp_fold, pd.read_csv(EXPECTED_DIR / "deep_seed_spread.csv"),
+                     pd.read_csv(fr_path) if fr_path.exists() else None,
+                     manifest.get("models"), manifest.get("signals"))
+        notes += n
+        failures += f
 
     report = out / "verify_report.txt"
-    lines = [f"verify: {out} against {EXPECTED_DIR}", *notes, *failures,
+    from fdes import TOOL_VERSION
+    lines = [f"verify: {out} against {EXPECTED_DIR} (otel-aiops-reproduction {TOOL_VERSION})", *notes, *failures,
              f"RESULT: {'PASS' if not failures else 'FAIL'} ({len(failures)} mismatch(es))"]
     report.write_text("\n".join(lines) + "\n")
     log("\n".join(lines))
@@ -761,13 +867,29 @@ def cmd_check(args) -> None:
 
 # --------------------------------------------------------------------------- main
 
+def require_dependencies() -> None:
+    """Every subcommand needs numpy and pandas. Without them the first import fails deep in a
+    traceback, which tells a reader nothing about what to do."""
+    missing = [m for m in ("numpy", "pandas", "sklearn") if importlib.util.find_spec(m) is None]
+    if missing:
+        sys.exit(f"{sys.executable} (Python {platform.python_version()}) lacks {', '.join(missing)}. "
+                 "Install the pinned requirements into a Python 3.11 venv (see Quick start in "
+                 "README.md), or run `make docker-build` so that make runs every target in the container.")
+
+
 def main() -> None:
     p = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
 
     s = sub.add_parser("fetch"); s.add_argument("--from-zip", default=None,
                                                help="use a local copy of otel-aiops-benchmark.zip instead of downloading")
+    s.add_argument("--from-external-zip", default=None,
+                   help=f"use a local copy of {EXTERNAL_FILE} instead of downloading")
     s.set_defaults(fn=cmd_fetch)
+
+    s = sub.add_parser("paper", help="every table and figure from the archived scores, checked cell by cell")
+    s.add_argument("--out", default=str(OUT_DIR / "paper"))
+    s.set_defaults(fn=cmd_paper)
 
     s = sub.add_parser("smoke"); s.add_argument("--out", default=str(OUT_DIR / "smoke")); s.set_defaults(fn=cmd_smoke)
 
@@ -790,7 +912,7 @@ def main() -> None:
     s.add_argument("parts", nargs="+", help="the --out directories of the slices")
     s.set_defaults(fn=cmd_merge)
 
-    s = sub.add_parser("paper-tables", help="Tables 4 to 12 in the article's layout")
+    s = sub.add_parser("paper-tables", help="Tables 4 to 16 in the article's layout")
     s.add_argument("--results", default=str(OUT_DIR / "full" / "results"),
                    help="a run's results/ directory, or 'archive' for the Zenodo results")
     s.add_argument("--out", default=None, help="default: <results>/../paper")
@@ -874,6 +996,9 @@ def main() -> None:
     s.set_defaults(fn=cmd_check)
 
     args = p.parse_args()
+    # fetch only downloads and unpacks, so it runs before the requirements are installed.
+    if args.cmd != "fetch":
+        require_dependencies()
     args.fn(args)
 
 

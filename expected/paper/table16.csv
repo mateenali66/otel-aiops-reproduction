@@ -1,0 +1,25 @@
+row,column,value
+OB|metrics-64,Recon-AE F1/AUC,0.71 / 0.56
+OB|metrics-64,D.SVDD AUC,0.82
+OB|metrics-64,DAGMM AUC,0.50
+OB|metrics-64,Iso. For. AUC,0.94
+SS|metrics-64,Recon-AE F1/AUC,0.70 / 0.60
+SS|metrics-64,D.SVDD AUC,0.80
+SS|metrics-64,DAGMM AUC,0.33
+SS|metrics-64,Iso. For. AUC,0.95
+OB|traces,Recon-AE F1/AUC,0.67 / 0.53
+OB|traces,D.SVDD AUC,0.64
+OB|traces,DAGMM AUC,0.52
+OB|traces,Iso. For. AUC,0.81
+OB|logs,Recon-AE F1/AUC,0.66 / 0.56
+OB|logs,D.SVDD AUC,0.62
+OB|logs,DAGMM AUC,0.51
+OB|logs,Iso. For. AUC,0.68
+SS|metrics,Recon-AE F1/AUC,0.69 / 0.53
+SS|metrics,D.SVDD AUC,0.71
+SS|metrics,DAGMM AUC,0.52
+SS|metrics,Iso. For. AUC,0.88
+ALI|metrics,Recon-AE F1/AUC,0.30 / 0.50
+ALI|metrics,D.SVDD AUC,0.52
+ALI|metrics,DAGMM AUC,0.51
+ALI|metrics,Iso. For. AUC,0.92

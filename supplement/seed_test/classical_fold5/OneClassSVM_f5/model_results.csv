@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+OneClassSVM,metrics,0.4131,0.9935,0.5836,0.4991,0.4306,0.4179,30958,74448,75401,57.59,5,0.12,"{'kernel': 'sigmoid', 'nu': 0.036503833523887946, 'gamma': 'auto'}"
+OneClassSVM,logs,0.3985,0.95,0.5614,0.4969,0.419,0.4215,4040,9632,10365,15.69,5,0.34,"{'kernel': 'sigmoid', 'nu': 0.036503833523887946, 'gamma': 'auto'}"
+OneClassSVM,traces,0.2654,1.0,0.4194,0.5048,0.2768,0.2654,3054,11508,11509,19.12,5,0.01,"{'kernel': 'poly', 'nu': 0.12374511199743694, 'gamma': 'scale'}"

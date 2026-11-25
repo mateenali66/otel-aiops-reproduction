@@ -1,0 +1,44 @@
+name: windows
+
+# The README's venv route on Windows with Git Bash and GNU make, the setup of a reviewer who
+# does not use Docker: install the pinned requirements, then make fetch, make paper, make test.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  venv-route:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: GNU make
+        run: choco install make --no-progress -y
+      - name: venv with the pinned requirements
+        run: python -m venv venv && venv/Scripts/python.exe -m pip install -r requirements.txt -c constraints.txt
+      - name: route make will take
+        run: make help | tail -1
+      - name: make fetch
+        run: make fetch
+      - name: make paper
+        run: make paper
+      - name: make test
+        run: make test
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: make-paper-report
+          path: |
+            out/paper/paper_report.txt
+            out/paper/paper_manifest.json
+            out/paper/tables/comparison.csv
+          if-no-files-found: warn

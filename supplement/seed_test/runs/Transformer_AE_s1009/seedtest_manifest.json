@@ -1,0 +1,52 @@
+{
+  "model": "Transformer_AE",
+  "fold": 5,
+  "seed": 1009,
+  "max_epochs": null,
+  "hyperparameters": {
+    "logs": {
+      "d_model": 64,
+      "nhead": 2,
+      "n_layers": 1,
+      "lr": 0.005399484409787433,
+      "dropout": 0.3005575058716044,
+      "epochs": 80
+    },
+    "traces": {
+      "d_model": 128,
+      "nhead": 4,
+      "n_layers": 2,
+      "lr": 0.00043308435993796206,
+      "dropout": 0.08002692399577624,
+      "epochs": 80
+    },
+    "metrics": {
+      "d_model": 128,
+      "nhead": 4,
+      "n_layers": 2,
+      "lr": 0.0004529783664935371,
+      "dropout": 0.11395690701105249,
+      "epochs": 80
+    }
+  },
+  "wall_s": 9931.8,
+  "pinned_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "REPRO_TORCH_THREADS": "8",
+    "ATEN_CPU_CAPABILITY": "avx2",
+    "ONEDNN_MAX_CPU_ISA": "AVX2",
+    "MKL_CBWR": "AVX2,STRICT",
+    "OPENBLAS_CORETYPE": "Haswell",
+    "NPY_DISABLE_CPU_FEATURES": "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL AVX512_SPR"
+  },
+  "hardware": {
+    "platform": "Linux-6.18.62-127.179.amzn2023.x86_64-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "python": "3.11.16",
+    "cpu_count": 128,
+    "torch": "2.5.1+cpu",
+    "torch_threads": 8
+  }
+}

@@ -1,4 +1,4 @@
-"""The article's Tables 4 to 12 and Figures 2 to 7, built from one results directory.
+"""The article's Tables 4 to 16 and Figures 2 to 7, built from one results directory.
 
 The Zenodo artifact's figure scripts predate Deep SVDD and DAGMM and read a
 `results_v3/merged` path the artifact does not contain, and nothing in it rebuilds Tables 10
@@ -6,8 +6,8 @@ to 12 from a run. Everything here reads a single `results/` directory, either th
 one (`--results archive`) or one written by `make reproduce`, and compares what it builds
 against the printed values in `expected/paper/`.
 
-Table 9 (inference cost) is hardware-bound and Tables 13 to 16 are separate studies with
-their own archived scripts, so neither is built here.
+Tables 9 and 13 to 16 report separate measurements and studies. They are aggregated from
+the deposit's own result files in fdes/extra_tables.py.
 """
 from __future__ import annotations
 
@@ -220,9 +220,27 @@ def fmt_time(mean_s: float, std_s: float) -> str:
     return f"{num(mean_s, 1)}{PM}{num(std_s, 1)} s"
 
 
-def table8(mr: pd.DataFrame) -> Table:
-    """Mean training time per fold, Optuna search included. Reflects the machine it ran on."""
-    t = mr.groupby(["model", "signal_type"])["train_time_s"].agg(["mean", "std"])
+# The article printed the Deep SVDD and DAGMM rows of Tables 8 and 11 with the population
+# standard deviation (ddof 0) and every other row with the sample standard deviation (ddof 1).
+# Both models joined those tables after the first campaign. Building them that way
+# reproduces the printed cells. write_paper_tables also writes a sample-SD build of both tables
+# and lists every cell that changes between the two.
+POPULATION_SD = {8: frozenset({"DEEP_SVDD", "DAGMM"}), 11: frozenset({"DAGMM"})}
+
+
+def spread(values: pd.Series, population: bool) -> float:
+    # One fold has no spread under either formula, and pm prints it as "(1 fold)".
+    if len(values) < 2:
+        return float("nan")
+    return float(values.std(ddof=0 if population else 1))
+
+
+def table8(mr: pd.DataFrame, population_sd: frozenset = frozenset()) -> Table:
+    """Mean training time per fold, Optuna search included. Reflects the machine it ran on.
+    Models in `population_sd` get the population standard deviation."""
+    g = mr.groupby(["model", "signal_type"])["train_time_s"]
+    t = g.mean().rename("mean").to_frame()
+    t["std"] = [spread(v, m in population_sd) for (m, _), v in g]
     rows = {}
     for m in ordered_models(mr["model"]):
         sigs = [s for s in SIGNAL_ORDER if (m, s) in t.index]
@@ -236,24 +254,33 @@ def table8(mr: pd.DataFrame) -> Table:
                  pd.DataFrame.from_dict(rows, orient="index"))
 
 
-def table10(summary: pd.DataFrame, target: float = 0.05) -> Table:
+def half_even(x: float, digits: int = 3) -> str:
+    """numpy's rounding, half to even on the scaled value. The printed Table 10 was rounded
+    this way: its two cells that sit exactly on a half print 0.052 (0.0515) and 0.874 (0.8745).
+    Python's formatting rounds the binary value and gives 0.051 and 0.875. Every other table
+    was printed with Python's formatting, which is why `num` stays the default."""
+    return f"{np.round(x, digits):.{digits}f}"
+
+
+def table10(summary: pd.DataFrame, target: float = 0.05, as_printed: bool = True) -> Table:
     """Performance at 5 percent target prevalence, the best signal per model by F1."""
+    fmt = half_even if as_printed else num
     s = summary[np.isclose(summary["target_prevalence"].astype(float), target)]
     if s.empty:
         raise Skip(f"no rows at target prevalence {target} (the signal's own prevalence "
                    "must exceed it, and the run needs raw scores)")
     s = s.sort_values(["model", "signal_type"])
     best = s.loc[s.groupby("model")["f1_mean"].idxmax()].sort_values("f1_mean", ascending=False)
-    rows = {r.model: {"Signal": r.signal_type, "F1": num(r.f1_mean),
-                      "PR-AUC": num(r.pr_auc_mean), "Precision": num(r.precision_mean),
-                      "Recall": num(r.recall_mean)} for r in best.itertuples()}
+    rows = {r.model: {"Signal": r.signal_type, "F1": fmt(r.f1_mean),
+                      "PR-AUC": fmt(r.pr_auc_mean), "Precision": fmt(r.precision_mean),
+                      "Recall": fmt(r.recall_mean)} for r in best.itertuples()}
     return Table(10, "Performance at 5% target anomaly prevalence (best signal per model)",
                  pd.DataFrame.from_dict(rows, orient="index"))
 
 
-def table11(sb: pd.DataFrame, cd: pd.DataFrame) -> Table:
-    """Supervised Random Forest against DAGMM, both with cooldown included. Sample std for
-    both rows, the convention of every other table here."""
+def table11(sb: pd.DataFrame, cd: pd.DataFrame, population_sd: frozenset = frozenset()) -> Table:
+    """Supervised Random Forest against DAGMM, both with cooldown included. Rows whose name
+    ("RF" or "DAGMM") is in `population_sd` get the population standard deviation."""
     dag = cd[cd["model"] == "DAGMM"]
     if dag.empty:
         raise Skip("needs DAGMM rows in model_results_with_cooldown.csv")
@@ -263,7 +290,8 @@ def table11(sb: pd.DataFrame, cd: pd.DataFrame) -> Table:
         for who, frame in (("RF", sb), ("DAGMM", dag)):
             sub = frame[frame["signal_type"] == sig]
             if not sub.empty:
-                rows[f"{sig}|{who}"] = {c: pm(sub[k].mean(), sub[k].std()) for c, k in cols}
+                rows[f"{sig}|{who}"] = {c: pm(sub[k].mean(), spread(sub[k], who in population_sd))
+                                        for c, k in cols}
     return Table(11, "Supervised Random Forest vs DAGMM (cooldown included, mean ± std)",
                  pd.DataFrame.from_dict(rows, orient="index"))
 
@@ -297,6 +325,8 @@ def artifact_module(artifact_dir: Path, name: str):
     """Import one of the artifact's analysis scripts without editing the archived file.
     Their own print-outs are long and go to a buffer instead of the console."""
     path = str(Path(artifact_dir) / "code" / "analysis")
+    if not (Path(path) / f"{name}.py").exists():
+        raise Skip(f"needs the artifact's code/analysis/{name}.py (make fetch)")
     sys.path.insert(0, path)
     try:
         mod = importlib.import_module(name)
@@ -468,6 +498,33 @@ def supervised_baseline(results_dir: Path, analysis_dir: Path, artifact_dir: Pat
     return pd.read_csv(path), f"recomputed by the artifact's supervised_baseline.py into {out}"
 
 
+def ARCHIVED_SUPERVISED(artifact_dir: Path) -> Path:
+    return Path(artifact_dir) / "data" / "results" / "supervised_baseline" / "supervised_baseline.csv"
+
+
+def rf_rerun_report(artifact_dir: Path, analysis_dir: Path) -> list[str]:
+    """The supervised Random Forests trained again, compared per fold with the article's.
+
+    They are seeded, and on macOS they reproduce the archived per-fold values exactly. On Linux
+    (the container) they differ by up to about 0.003 per fold, enough to move one printed
+    standard deviation of Table 11 in the third decimal. So make paper builds Table 11 from
+    the archived results and reports this comparison instead of judging it.
+    """
+    try:
+        rerun, _ = supervised_baseline(Path(analysis_dir), Path(analysis_dir) / "rf_rerun", artifact_dir, True)
+    except Skip as e:
+        return [f"Table 11 Random Forest rerun: skipped, {e}"]
+    arch = read_csv(ARCHIVED_SUPERVISED(artifact_dir), "the archived supervised baseline")
+    m = arch.merge(rerun, on=["signal_type", "fold"], suffixes=("_arch", "_rerun"))
+    cols = ["precision", "recall", "f1_score", "auc_roc", "pr_auc"]
+    gaps = {c: float((m[f"{c}_arch"] - m[f"{c}_rerun"]).abs().max()) for c in cols}
+    worst = max(gaps.values())
+    return [f"Table 11 Random Forest rerun: {len(m)} per-fold rows against the article's, largest gap "
+            f"{worst:.4f} ({', '.join(f'{c} {g:.4f}' for c, g in gaps.items())}); "
+            + ("identical to the archived results" if worst == 0 else
+               "Table 11 is built from the archived results, so this does not change it")]
+
+
 # --------------------------------------------------------------------------- label alignment
 
 # training.py (line 2304) saves each deep model's test labels shifted by SEQ_LENGTH - 1 to
@@ -556,6 +613,17 @@ def long_form(t: Table) -> pd.DataFrame:
     return s.rename("value").reset_index()
 
 
+def source_only_cells(expected_dir: Path, number: int) -> set:
+    """(row, column) of the cells of one table that are in the article's LaTeX source but
+    not in the typeset article (expected/paper/source_only.csv)."""
+    path = Path(expected_dir) / "source_only.csv"
+    if not path.exists():
+        return set()
+    so = pd.read_csv(path, dtype=str, keep_default_na=False)
+    so = so[so["table"].astype(int) == number]
+    return set(zip(so["row"], so["column"]))
+
+
 def compare(t: Table, expected_dir: Path = EXPECTED_DIR) -> tuple[pd.DataFrame, list[str]]:
     """Every printed cell of the article's table against the cell built here."""
     path = Path(expected_dir) / f"table{t.number}.csv"
@@ -567,11 +635,16 @@ def compare(t: Table, expected_dir: Path = EXPECTED_DIR) -> tuple[pd.DataFrame, 
     m["status"] = np.where(m["value_built"].isna(), "not in these results",
                            np.where(m["value_printed"] == m["value_built"], "match", "differs"))
     m.insert(0, "table", t.number)
-    n_match = int((m["status"] == "match").sum())
-    n_diff = int((m["status"] == "differs").sum())
-    n_missing = int((m["status"] == "not in these results").sum())
-    lines = [f"  Table {t.number}: {n_match} of {len(m)} printed cells match, {n_diff} differ, "
-             f"{n_missing} not in these results"]
+    src = source_only_cells(expected_dir, t.number)
+    is_src = pd.Series([(r, c) in src for r, c in zip(m["row"], m["column"])], index=m.index)
+    p = m[~is_src]
+    n_match = int((p["status"] == "match").sum())
+    n_diff = int((p["status"] == "differs").sum())
+    n_missing = int((p["status"] == "not in these results").sum())
+    lines = [f"  Table {t.number}: {n_match} of {len(p)} printed cells match, {n_diff} differ, "
+             f"{n_missing} not in these results"
+             + (f"; {int((m[is_src]['status'] == 'match').sum())} of {int(is_src.sum())} cells that are only "
+                "in the LaTeX source match" if is_src.any() else "")]
     for r in m[m["status"] == "differs"].itertuples():
         lines.append(f"    differs  {r.row} / {r.column}: printed {r.value_printed}, built {r.value_built}")
     missing = m[m["status"] == "not in these results"]
@@ -582,6 +655,79 @@ def compare(t: Table, expected_dir: Path = EXPECTED_DIR) -> tuple[pd.DataFrame, 
         cols = sorted(set(missing["column"]))
         lines.append(f"    missing  {len(missing)} cells, columns {', '.join(cols)}")
     return m, lines
+
+
+# --------------------------------------------------------------------------- verdict
+
+def verdict(comparison_csv: Path, expected_dir: Path = EXPECTED_DIR,
+            annotate: bool = False) -> tuple[bool, list[str]]:
+    """Every printed cell in expected/paper/table*.csv against what was built.
+
+    A cell passes if it matches, or if it differs and exceptions.csv lists it with the same
+    printed value and a reason. Anything else fails: an unlisted difference, a printed cell
+    that was not built, or a listed cell that now matches (the list must stay accurate).
+    """
+    expected_dir = Path(expected_dir)
+    printed = pd.concat([pd.read_csv(f, dtype=str, keep_default_na=False).assign(table=int(f.stem[5:]))
+                         for f in sorted(expected_dir.glob("table*.csv")) if f.stem[5:].isdigit()],
+                        ignore_index=True)
+    built = pd.read_csv(comparison_csv, dtype=str, keep_default_na=False) if Path(comparison_csv).exists() \
+        else pd.DataFrame(columns=["table", "row", "column", "value_built", "status"])
+    built["table"] = built["table"].astype(int)
+    exc = pd.read_csv(expected_dir / "exceptions.csv", dtype=str, keep_default_na=False)
+    exc["table"] = exc["table"].astype(int)
+    keys = ["table", "row", "column"]
+    m = printed.merge(built[keys + ["value_built", "status"]], on=keys, how="left")
+    m = m.merge(exc[keys + ["printed", "reason"]], on=keys, how="left")
+    m["status"] = m["status"].fillna("table not built")
+    listed = m["reason"].notna()
+    matched = m["status"] == "match"
+    ok_listed = listed & ~matched & (m["printed"] == m["value"])
+    bad = m[~matched & ~ok_listed]
+    stale = m[listed & matched]
+    orphan = exc.merge(printed[keys], on=keys, how="left", indicator=True)
+    orphan = orphan[orphan["_merge"] == "left_only"]
+    n, n_match, n_listed = len(m), int(matched.sum()), int(ok_listed.sum())
+    lines = [f"printed cells in Tables {', '.join(str(t) for t in sorted(m['table'].unique()))}: {n}",
+             f"  reproduced exactly: {n_match}",
+             f"  listed in expected/paper/exceptions.csv with a reason: {n_listed}"]
+    for t, g in m[ok_listed].groupby("table"):
+        lines.append(f"    Table {t}: {len(g)} cells ({g['reason'].iloc[0][:110]}...)")
+    for r in bad.itertuples():
+        lines.append(f"  FAIL Table {r.table} {r.row} / {r.column}: printed {r.value}, "
+                     f"built {r.value_built or '-'} ({r.status}, not in exceptions.csv)")
+    for r in stale.itertuples():
+        lines.append(f"  FAIL Table {r.table} {r.row} / {r.column} is listed in exceptions.csv but matches; "
+                     "remove it from the list")
+    for r in orphan.itertuples():
+        lines.append(f"  FAIL exceptions.csv lists Table {r.table} {r.row} / {r.column}, which is not a printed cell")
+    ok = bad.empty and stale.empty and orphan.empty
+    # Cells that are in the article's LaTeX source but were lost when the article was typeset
+    # are compared like the rest, and counted apart from the printed cells.
+    src_path = expected_dir / "source_only.csv"
+    is_src = np.zeros(len(m), dtype=bool)
+    if src_path.exists():
+        so = pd.read_csv(src_path, dtype=str, keep_default_na=False)
+        so["table"] = so["table"].astype(int)
+        tagged = m.merge(so[keys], on=keys, how="left", indicator="where")
+        is_src = (tagged["where"] == "both").to_numpy()
+        lines[0:3] = [
+            f"printed cells in Tables {', '.join(str(t) for t in sorted(m['table'].unique()))}: {int((~is_src).sum())}",
+            f"  reproduced exactly: {int((matched.to_numpy() & ~is_src).sum())}",
+            f"  listed in expected/paper/exceptions.csv with a reason: {int((ok_listed.to_numpy() & ~is_src).sum())}",
+        ]
+        lines.insert(3, f"cells in the LaTeX source but not in the typeset article (expected/paper/source_only.csv): "
+                        f"{int(is_src.sum())}, {int((matched.to_numpy() & is_src).sum())} reproduced exactly, "
+                        f"{int((ok_listed.to_numpy() & is_src).sum())} listed")
+    if annotate and Path(comparison_csv).exists():
+        # comparison.csv on its own then gives the same counts as the report.
+        out = m.rename(columns={"value": "value_printed"})[["table", "row", "column", "value_printed",
+                                                           "value_built", "status", "reason"]].copy()
+        out.insert(6, "in_typeset_article", ~is_src)
+        out = out.rename(columns={"reason": "listed_reason"})
+        out["listed_reason"] = out["listed_reason"].where(ok_listed.to_numpy(), "")
+        out.to_csv(comparison_csv, index=False)
+    return ok, lines
 
 
 # --------------------------------------------------------------------------- output
@@ -616,12 +762,18 @@ def write_table(t: Table, tables_dir: Path, suffix: str = "") -> None:
 
 
 def write_paper_tables(results_dir: Path, out_dir: Path, artifact_dir: Path,
-                       recompute: bool = False) -> list[str]:
-    """Build Tables 4-8 and 10-12 and compare them against the printed article.
+                       recompute: bool = False, external_dir: Path | None = None,
+                       supervised_from_archive: bool = False) -> list[str]:
+    """Build Tables 4 to 16 and compare them against the printed article.
 
     `recompute` runs the artifact's analysis scripts even on the archived results, which
-    would otherwise use the analysis CSVs shipped beside them.
+    would otherwise use the analysis CSVs shipped beside them. `supervised_from_archive` takes
+    Table 11's Random Forest rows from the article's archived results whatever the results
+    directory is (see rf_rerun_report for why). Tables 9 and 13 to 16 come
+    from the deposit's result files whatever `results_dir` is (fdes/extra_tables.py); Table
+    16 needs the external-validity file that `make fetch` unpacks into `external_dir`.
     """
+    from fdes.extra_tables import build_extra_tables
     results_dir, out_dir = Path(results_dir), Path(out_dir)
     if not (results_dir / "model_results.csv").exists():
         sys.exit(f"no model_results.csv under {results_dir}")
@@ -678,8 +830,13 @@ def write_paper_tables(results_dir: Path, out_dir: Path, artifact_dir: Path,
         c = cd()
         if c[c["model"] == "DAGMM"].empty:
             raise Skip("needs DAGMM rows in model_results_with_cooldown.csv")
-        sb, src = supervised_baseline(results_dir, analysis_dir, artifact_dir, recompute)
-        t = table11(sb, c)
+        if supervised_from_archive:
+            sb = read_csv(ARCHIVED_SUPERVISED(artifact_dir), "the archived supervised baseline")
+            src = "the article's Random Forest results (archived supervised_baseline.csv)"
+        else:
+            sb, src = supervised_baseline(results_dir, analysis_dir, artifact_dir, recompute)
+        frames[11] = (sb, c)
+        t = table11(sb, c, POPULATION_SD[11])
         t.notes.append(f"source: {src}")
         return t
 
@@ -692,7 +849,10 @@ def write_paper_tables(results_dir: Path, out_dir: Path, artifact_dir: Path,
 
     builders = [(4, lambda: table4(mr)), (5, lambda: table5(fu())), (6, lambda: table6(fu(), cd())),
                 (7, t7),
-                (8, lambda: table8(mr)), (10, t10), (11, t11), (12, t12)]
+                (8, lambda: table8(mr, POPULATION_SD[8])), (10, t10), (11, t11), (12, t12)]
+    builders += build_extra_tables(mr, artifact_dir, external_dir or Path(artifact_dir).parent / "external-validity"
+                                   / "data" / "analysis-results" / "external-validity")
+    builders.sort(key=lambda b: b[0])
     comparisons, built = [], {}
     for number, build in builders:
         try:
@@ -715,10 +875,37 @@ def write_paper_tables(results_dir: Path, out_dir: Path, artifact_dir: Path,
         allc = pd.concat([c for c in comparisons if len(c)], ignore_index=True)
         allc.to_csv(tables_dir / "comparison.csv", index=False)
         n = allc["status"].value_counts().to_dict()
-        log.append(f"printed cells: {n.get('match', 0)} match, {n.get('differs', 0)} differ, "
+        log.append(f"cells compared, printed and LaTeX-source-only together: {len(allc)}, "
+                   f"{n.get('match', 0)} match, {n.get('differs', 0)} differ, "
                    f"{n.get('not in these results', 0)} not in these results "
                    f"(every cell in {tables_dir / 'comparison.csv'})")
+    log.extend(sample_sd_pass(tables_dir, built, mr, frames))
     log.extend(aligned_label_pass(results_dir, tables_dir, analysis_dir, artifact_dir, built, frames))
+    return log
+
+
+def sample_sd_pass(tables_dir: Path, built: dict, mr: pd.DataFrame, frames: dict) -> list[str]:
+    """Tables 8 and 11 again with the sample standard deviation in every row, beside the
+    as-printed build. Cells that differ between the two are listed."""
+    log, changes = [], []
+    for n in (8, 11):
+        if n not in built or (n == 11 and 11 not in frames):
+            continue
+        t = table8(mr) if n == 8 else table11(*frames[11])
+        write_table(t, tables_dir, "_sample_sd")
+        # Table 8 rows are keyed by model, Table 11 rows by "signal|RF" or "signal|DAGMM".
+        c = changed_cells(n, built[n], t, MODEL_ORDER if n == 8 else SIGNAL_ORDER).rename(
+            columns={"archived": "population_sd", "aligned": "sample_sd"})
+        changes.append(c)
+        rows = ", ".join(sorted(POPULATION_SD[n]))
+        log.append(f"  Table {n} with the sample SD in every row: wrote tables/table{n}_sample_sd.csv and .tex, "
+                   f"{len(c)} cells change (the article printed {rows} with the population SD)")
+        for r in c.itertuples():
+            where = f"printed {r.printed}" if r.printed else "not printed"
+            log.append(f"    changes  {r.row} / {r.column}: population SD {r.population_sd}, "
+                       f"sample SD {r.sample_sd} ({where})")
+    if changes:
+        pd.concat(changes, ignore_index=True).to_csv(tables_dir / "sample_sd_changes.csv", index=False)
     return log
 
 
@@ -909,18 +1096,26 @@ def write_figures(results_dir: Path, out_dir: Path) -> list[str]:
         return notes + [_save(fig, figures_dir, "fig5_fusion_delta")]
 
     def fig6():
-        piv = per_fault_recall(read_csv(results_dir / "per_fault_type_results.csv", "per-fault results"))
-        piv = piv.T
-        piv.index = [DISPLAY.get(m, m) for m in piv.index]
-        fig, ax = plt.subplots(figsize=(7.16, 0.45 * len(piv) + 0.8))
-        sns.heatmap(piv, annot=True, fmt=".2f", cmap="RdYlGn", vmin=0.0, vmax=1.0, linewidths=0.6,
-                    linecolor="white", cbar_kws={"label": "Mean Recall", "shrink": 0.85}, ax=ax)
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.set_title("Per-Fault-Type Recall (Traces Signal)", fontweight="bold", pad=10)
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha="right")
-        ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
-        return [_save(fig, figures_dir, "fig6_per_fault_recall_heatmap")]
+        # The printed Figure 6 shows the six models of the first campaign. Deep SVDD and DAGMM,
+        # whose per-fault recall is in Table 7, are drawn in a second file beside it.
+        full = per_fault_recall(read_csv(results_dir / "per_fault_type_results.csv", "per-fault results")).T
+        out = []
+        for models, name in ((FUSION_SCOPE, "fig6_per_fault_recall_heatmap"),
+                             (MODEL_ORDER, "fig6_per_fault_recall_heatmap_all_models")):
+            piv = full.loc[[m for m in models if m in full.index]]
+            if piv.empty:
+                continue
+            piv.index = [DISPLAY.get(m, m) for m in piv.index]
+            fig, ax = plt.subplots(figsize=(7.16, 0.45 * len(piv) + 0.8))
+            sns.heatmap(piv, annot=True, fmt=".2f", cmap="RdYlGn", vmin=0.0, vmax=1.0, linewidths=0.6,
+                        linecolor="white", cbar_kws={"label": "Mean Recall", "shrink": 0.85}, ax=ax)
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_title("Per-Fault-Type Recall (Traces Signal)", fontweight="bold", pad=10)
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha="right")
+            ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+            out.append(_save(fig, figures_dir, name))
+        return out
 
     def fig7():
         t = mr.groupby(["model", "signal_type"])["train_time_s"].agg(["mean", "std"])

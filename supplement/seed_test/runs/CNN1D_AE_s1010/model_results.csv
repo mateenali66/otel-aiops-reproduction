@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+CNN1D_AE,metrics,0.4105,1.0,0.5821,0.2194,0.3812,0.4105,30947,75390,75390,2319.26,5,0.01,"{'filters': 32, 'kernel_size': 3, 'n_layers': 4, 'lr': 0.0015930522616241021, 'dropout': 0.35403628889802274, 'epochs': 30}"
+CNN1D_AE,logs,0.3891,1.0,0.5602,0.3783,0.4887,0.3891,4028,10353,10353,248.9,5,0.01,"{'filters': 32, 'kernel_size': 3, 'n_layers': 4, 'lr': 0.0015930522616241021, 'dropout': 0.35403628889802274, 'epochs': 30}"
+CNN1D_AE,traces,0.5669,0.3623,0.4421,0.4352,0.4612,0.7582,3039,1942,11494,377.88,5,0.51,"{'filters': 64, 'kernel_size': 7, 'n_layers': 4, 'lr': 0.0020799706636213575, 'dropout': 0.1821495010096222, 'epochs': 40}"

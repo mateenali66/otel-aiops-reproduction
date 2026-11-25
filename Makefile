@@ -4,13 +4,16 @@
 #   make fetch          download Zenodo 10.5281/zenodo.22078287 and verify the md5
 #   make smoke          one signal, one fold, minutes on a laptop CPU
 #   make verify         compare out/smoke against expected/ (exit 1 on mismatch)
+#   make paper          every table and figure from the archived scores, no training, each
+#                       printed cell checked against the article (exit 1 on any unlisted mismatch)
 #   make verify-archive recompute the archived tables from the archived raw scores
 #   make reproduce      full 8 models x 3 signals x 5 folds (prints the estimate first)
 #   make verify MODE=full
+#   make merge          rebuild out/full/results from out/full/fold* without training (or PARTS=)
 #   make pilot          run the example detector plugin under the FDES procedure
 #   make check          run the FDES checks on your own alert or score CSVs (no Zenodo needed)
 #   make test           unit tests for the check and pilot paths (no Zenodo needed)
-#   make paper-tables   Tables 4 to 12 in the article's layout (RESULTS=archive for Zenodo's)
+#   make paper-tables   Tables 4 to 16 in the article's layout (RESULTS=archive for Zenodo's)
 #   make figures        Figures 2 to 7 in the article's layout (RESULTS=archive for Zenodo's)
 #   make docker-build / docker-smoke
 #
@@ -18,11 +21,15 @@
 # and out/ mounted from the checkout. NO_DOCKER=1 runs the targets on the local Python
 # instead.
 
-PYTHON ?= $(shell command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
+# The venv the README creates, if there is one (venv/Scripts under Git Bash on Windows), then
+# python3, then python.
+PYTHON ?= $(shell if [ -x venv/bin/python ]; then echo venv/bin/python; \
+	elif [ -x venv/Scripts/python.exe ]; then echo venv/Scripts/python.exe; \
+	elif command -v python3 >/dev/null 2>&1; then echo python3; else echo python; fi)
 DOCKER ?= docker
 MODE   ?= smoke
 OUT    ?= out/$(MODE)
-IMAGE  ?= otel-aiops-reproduction:1.4.1
+IMAGE  ?= otel-aiops-reproduction:1.5.0
 RESULTS ?= out/full/results
 DETECTOR ?= detectors.example_isolation_forest:ExampleIsolationForest
 SIGNAL ?= logs
@@ -39,7 +46,7 @@ FROM      ?= 2026-03-01T00:00:00Z
 TO        ?= 2026-03-08T00:00:00Z
 SCORES    ?=
 
-.PHONY: help fetch smoke reproduce verify verify-archive estimate pilot check test examples expected paper-tables figures docker-build docker-smoke clean
+.PHONY: help fetch paper smoke reproduce merge verify verify-archive estimate pilot check test examples expected paper-tables figures docker-build docker-smoke clean
 
 # Git Bash on Windows rewrites arguments that look like paths, including the container's
 # /work. These two variables turn that off.
@@ -64,17 +71,24 @@ ROUTE = local $(PYTHON)
 endif
 
 help:
-	@sed -n '2,19p' Makefile
+	@sed -n '1,22p' Makefile
 	@echo "route: $(ROUTE)"
 
 fetch:
-	$(RUN) bin/reproduce.py fetch $(if $(FROM_ZIP),--from-zip $(FROM_ZIP))
+	$(RUN) bin/reproduce.py fetch $(if $(FROM_ZIP),--from-zip $(FROM_ZIP)) $(if $(FROM_EXTERNAL_ZIP),--from-external-zip $(FROM_EXTERNAL_ZIP))
+
+paper:
+	$(RUN) bin/reproduce.py paper --out out/paper
 
 smoke:
 	$(RUN) bin/reproduce.py smoke --out out/smoke
 
 reproduce:
 	$(RUN) bin/reproduce.py reproduce --out out/full $(if $(FOLDS),--folds $(FOLDS)) $(if $(SIGNALS),--signals $(SIGNALS)) $(if $(MODELS),--models $(MODELS))
+
+# PARTS defaults to the fold directories that `make reproduce FOLDS=k` leaves in out/full.
+merge:
+	$(RUN) bin/reproduce.py merge --out out/full $(or $(PARTS),$(sort $(wildcard out/full/fold*)))
 
 estimate:
 	$(RUN) bin/reproduce.py estimate

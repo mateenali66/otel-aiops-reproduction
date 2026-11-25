@@ -148,6 +148,26 @@ class TestFusionScope(unittest.TestCase):
             self.assertIn("DAGMM left out of Figures 4 and 5", log)
             self.assertTrue((Path(d) / "paper" / "figures" / "fig4_fusion_heatmap.pdf").exists())
 
+    def test_figure_6_draws_the_article_six_and_writes_all_eight_beside_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            res = Path(d) / "results"
+            res.mkdir()
+            pd.DataFrame(model_rows("IsolationForest", "traces", [0.5, 0.6]) +
+                         model_rows("DAGMM", "traces", [0.8, 0.9])).to_csv(res / "model_results.csv", index=False)
+            pd.DataFrame([dict(model=m, signal_type="traces", fault_type=f, precision=1.0, recall=0.8,
+                               f1_score=0.9, sample_count=10)
+                          for m in ("IsolationForest", "DAGMM") for f in paper.FAULT_LABEL]).to_csv(
+                res / "per_fault_type_results.csv", index=False)
+            write_figures(res, Path(d) / "paper")
+            figs = Path(d) / "paper" / "figures"
+            self.assertTrue((figs / "fig6_per_fault_recall_heatmap.pdf").exists())
+            self.assertTrue((figs / "fig6_per_fault_recall_heatmap_all_models.pdf").exists())
+            # The printed figure has no DAGMM row; the all-models file has one.
+            import matplotlib
+            matplotlib.use("Agg")
+            self.assertEqual(paper.FUSION_SCOPE, paper.MODEL_ORDER[:6])
+            self.assertNotIn("DAGMM", paper.FUSION_SCOPE)
+
 
 class TestPerFault(unittest.TestCase):
     def frame(self, faults):

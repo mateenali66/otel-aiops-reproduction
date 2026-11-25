@@ -1,0 +1,61 @@
+{
+  "model": "DAGMM",
+  "fold": 5,
+  "seed": 1001,
+  "max_epochs": null,
+  "hyperparameters": {
+    "metrics": {
+      "hidden_dim": 128,
+      "n_layers": 1,
+      "latent_dim": 16,
+      "n_gmm": 8,
+      "lr": 0.0016525238146992878,
+      "dropout": 0.21097566674743787,
+      "lambda_energy": 0.4873779959856692,
+      "lambda_cov_diag": 0.004775939838230008,
+      "epochs": 30
+    },
+    "logs": {
+      "hidden_dim": 128,
+      "n_layers": 1,
+      "latent_dim": 8,
+      "n_gmm": 2,
+      "lr": 0.005532496914298506,
+      "dropout": 0.40183603844955723,
+      "lambda_energy": 0.0768316328806251,
+      "lambda_cov_diag": 0.007808345085542414,
+      "epochs": 70
+    },
+    "traces": {
+      "hidden_dim": 32,
+      "n_layers": 2,
+      "latent_dim": 4,
+      "n_gmm": 4,
+      "lr": 0.00018155571490425186,
+      "dropout": 0.47595982982032625,
+      "lambda_energy": 0.05145923792348292,
+      "lambda_cov_diag": 0.00246631347134215,
+      "epochs": 40
+    }
+  },
+  "wall_s": 1849.4,
+  "pinned_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "REPRO_TORCH_THREADS": "8",
+    "ATEN_CPU_CAPABILITY": "avx2",
+    "ONEDNN_MAX_CPU_ISA": "AVX2",
+    "MKL_CBWR": "AVX2,STRICT",
+    "OPENBLAS_CORETYPE": "Haswell",
+    "NPY_DISABLE_CPU_FEATURES": "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL AVX512_SPR"
+  },
+  "hardware": {
+    "platform": "Linux-6.18.62-127.179.amzn2023.x86_64-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "python": "3.11.16",
+    "cpu_count": 128,
+    "torch": "2.5.1+cpu",
+    "torch_threads": 8
+  }
+}

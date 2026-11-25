@@ -156,6 +156,8 @@ def run_pilot(training, detector, signal: str, fold_id: int, features_dir: Path,
         "fdes_checks": checks,
         "verdict": checks["fdes_verdict"],
     }
+    from fdes import TOOL_VERSION
+    result.setdefault("tool_version", TOOL_VERSION)
     (out_dir / "pilot_result.json").write_text(json.dumps(result, indent=2, default=str))
     (out_dir / "pilot_report.md").write_text(render_report(result))
     return result

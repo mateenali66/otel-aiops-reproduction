@@ -1,13 +1,15 @@
 # Reproduction package: ML anomaly detection on unified OpenTelemetry telemetry
 
-This repository reproduces the IEEE Access article
+| | |
+|---|---|
+| Article | M. A. Anjum, "Evaluating ML-Based Anomaly Detection on Unified OpenTelemetry Telemetry: An Empirical Study Across Traces, Metrics, and Logs," IEEE Access, vol. 14, pp. 93576-93608, 2026. DOI [10.1109/ACCESS.2026.3705430](https://doi.org/10.1109/ACCESS.2026.3705430). Open access, CC BY 4.0 |
+| Author | Mateen Ali Anjum, Phono Technologies Inc., Toronto, ON, Canada. mateen@phonotech.ca |
+| Package | otel-aiops-reproduction 1.5.0, this README dated 2026-11-24. [github.com/mateenali66/otel-aiops-reproduction](https://github.com/mateenali66/otel-aiops-reproduction), tag `v1.5.0`, archived on Zenodo at [10.5281/zenodo.24518271](https://doi.org/10.5281/zenodo.24518271) (concept DOI [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version) |
+| Data | Zenodo [10.5281/zenodo.22078287](https://doi.org/10.5281/zenodo.22078287) (record v3.1.3), raw telemetry on Figshare [10.6084/m9.figshare.34669797](https://doi.org/10.6084/m9.figshare.34669797). See [Data availability](#data-availability) |
 
-> M. A. Anjum, "Evaluating ML-Based Anomaly Detection on Unified OpenTelemetry Telemetry:
-> An Empirical Study Across Traces, Metrics, and Logs," IEEE Access, vol. 14,
-> pp. 93576-93608, 2026. DOI [10.1109/ACCESS.2026.3705430](https://doi.org/10.1109/ACCESS.2026.3705430)
-
-from its published Zenodo artifact (DOI [10.5281/zenodo.22078287](https://doi.org/10.5281/zenodo.22078287),
-record v3.1.3). It runs in a pinned container with fixed seeds and documented expected output.
+This repository reproduces the article's tables and figures from its published Zenodo
+artifact. It runs in a pinned container or a pinned virtual environment, and every result it
+produces is checked against the article.
 
 It is the reference implementation of the Failure Detection Evaluation Specification (FDES)
 v1.0.0-draft ([github.com/mateenali66/failure-detection-evaluation-spec](https://github.com/mateenali66/failure-detection-evaluation-spec))
@@ -21,26 +23,54 @@ why it is built the way it is. `CHANGELOG.md` lists changes by version.
 
 | You want to | Read |
 |---|---|
-| Reproduce the article's numbers | [Quick start](#quick-start), then [What `make verify` compares](#what-make-verify-compares) |
+| Reproduce the article's tables and figures | [Quick start](#quick-start), then [Every table and figure](#every-table-and-figure-and-where-it-comes-from) |
+| Retrain the models and check the result | [Retraining](#retraining), then [What `make verify` compares](#what-make-verify-compares) |
 | Check your own monitoring data | [Check your own data](#check-your-own-data). Two CSVs, no download, about two minutes |
 | Put your own detector through the procedure | [Run against your own detector](#run-against-your-own-detector) |
 
 ## Quick start
 
 ```bash
-git clone <this repository> && cd reproduction
-python3 -m venv venv && ./venv/bin/pip install -r requirements.txt   # or: make docker-build
-make fetch            # downloads the Zenodo zip (63 MB), verifies md5, unpacks to data/
-make smoke            # one signal, one fold: a few minutes on a laptop CPU
-make verify           # compares out/smoke against expected/, exit code 1 on mismatch
-make verify-archive   # regenerates the archived tables from the archived raw scores (seconds)
-make pilot            # runs the example detector plugin under the FDES procedure
-make check            # runs the FDES checks on the sample CSVs in examples/
-make test             # unit tests (no Zenodo download needed)
+git clone https://github.com/mateenali66/otel-aiops-reproduction && cd otel-aiops-reproduction
+python3.11 -m venv venv && venv/bin/pip install -r requirements.txt -c constraints.txt   # or: make docker-build
+make fetch     # downloads both files of the Zenodo record (63 MB), checks their md5, unpacks to data/
+make paper     # every table and figure of the article, no training, 5 to 7 minutes
+make test      # unit tests
 ```
 
-`make check` and `make test` need neither the Zenodo download nor a GPU. They need numpy,
-pandas and scikit-learn from `requirements.txt`.
+The venv route needs Python 3.11, the version the container uses and every recorded run was
+made with. If your system has no `python3.11` (a stock Mac has 3.9), install it before creating
+the venv, for example from python.org or with `uv python install 3.11`, which puts `python3.11`
+in `~/.local/bin`. Recorded runs used 3.11.14 and 3.11.18. The container pins its Python by
+image digest. Every `make` target then runs on
+`venv/bin/python`, or `venv/Scripts/python.exe` under Git Bash on Windows, without activating
+it. `make help` prints the route it will take. `requirements.txt` pins the nine packages the code
+imports and `constraints.txt` pins everything they pull in.
+
+`make paper` passes when every printed cell of Tables 4 to 16 has been reproduced or is listed,
+with its reason, in `expected/paper/exceptions.csv`. Its report, `out/paper/paper_report.txt`,
+gives the count for each table, every cell that differs and the comparisons behind the figures.
+A run on a clean machine ends like this:
+
+```
+printed cells in Tables 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16: 575
+  reproduced exactly: 550
+  listed in expected/paper/exceptions.csv with a reason: 25
+cells in the LaTeX source but not in the typeset article (expected/paper/source_only.csv): 16, 12 reproduced exactly, 4 listed
+    Table 7: 20 cells (No archived file produces this cell. ...)
+    Table 11: 3 cells (The printed mean matches. ...)
+    Table 14: 6 cells (Set by the Drain/TF-IDF/PCA fit on the raw log corpus, ...)
+RESULT: PASS
+```
+
+PASS means every printed cell is either reproduced or listed with its reason. It does not mean
+all 575 are reproduced: 25 are not, and the list says why for each. `out/paper/paper_manifest.json`
+records the package version, the Python and library versions, the machine, and the md5 of the
+Zenodo files the run read.
+
+`bin/reproduce.py` exits 0 on PASS and 1 on FAIL. Through `make`, a failed command prints
+`make: *** [paper] Error 1` and make itself exits 2, whatever the command's code was, so for
+scripting call `bin/reproduce.py` directly (`venv/bin/python bin/reproduce.py paper`).
 
 The container route needs no local Python. After `make docker-build`, every target runs
 inside the image with `data/` and `out/` mounted from the checkout. `NO_DOCKER=1` runs a
@@ -51,135 +81,283 @@ make docker-build     # python:3.11-slim pinned by digest, CPU torch, exact pins
 make docker-smoke     # fetch, smoke and verify inside the container
 ```
 
-The full reproduction covers 8 models x 3 signals x 5 folds. Read the runtimes section
-before starting it.
+Other targets:
 
 ```bash
-make reproduce                       # prints the estimate, then runs everything
-make reproduce FOLDS=1               # or one fold at a time
-make verify MODE=full
+make smoke            # one signal, one fold of training: a few minutes on a laptop CPU
+make verify           # compares out/smoke against expected/, exit code 1 on mismatch
+make verify-archive   # regenerates the archived tables from the archived raw scores (seconds)
+make pilot            # runs the example detector plugin under the FDES procedure
+make check            # runs the FDES checks on the sample CSVs in examples/
 ```
 
-To split the grid across machines, run slices with `bin/reproduce.py reproduce --out
-<dir> --folds ... --models ...`, each covering all three signals, and join them with
-`python bin/reproduce.py merge --out out/full <dir> <dir> ...`. A merged run gives the same
-numbers as one `make reproduce` (see [Seed policy and determinism](#seed-policy-and-determinism)).
+`make check` and `make test` need neither the Zenodo download nor a GPU. Tests that need the
+download skip themselves without it.
 
 `bin/reproduce.py` is the single entry point behind every target, and `python
 bin/reproduce.py -h` lists the subcommands. No cloud account, S3 bucket or SageMaker role is
-needed. The artifact's SageMaker orchestration (`run_pipeline.py`) is not used, and
-`training.py` runs in its `--local` code path with CPU forced.
+needed. The artifact's SageMaker orchestration (`run_pipeline.py`) is not used. A retrain still
+prints "SageMaker Training" at the start, because that banner is part of the archived
+`training.py`. The `PAPER5_` environment variables in its log and manifest are the archived
+`training.py`'s own settings. "Paper 5" is the author's working name for the article, and it
+also names the record's second file.
 
-## What gets reproduced, and from what
+## Two ways to reproduce the article
 
-`make fetch` downloads `otel-aiops-benchmark.zip` from Zenodo record 22078287 and checks it
-against the md5 in `expected/zenodo_checksums.json` (`ef2cd3b74b17d7984e56fe09b10684eb`,
-62,897,450 bytes, taken from the Zenodo API on 2026-08-29). The zip holds the processed
-60-second feature tables for the three signals (`data/features/*.parquet`, 58 MB), the
-article's per-fold results and raw anomaly scores, and the pipeline code.
+**From the deposit, without training (`make paper`).** The Zenodo record keeps every model's
+anomaly scores for every signal and fold. `make paper` recomputes every per-fold result from
+those scores with the artifact's own `training.py` functions (its test split, cooldown rule,
+metrics, late fusion and per-fault evaluation), checks each recomputed value against the
+archived results, and builds every table and figure from there. It reproduces the article
+exactly, apart from the 29 listed cells, on any machine, because nothing in it depends on
+training.
 
-The pipeline runs as archived, with one fix applied at load time (see [Known differences
-from the article](#known-differences-from-the-article)). This repository adds the wrapper:
-seeding, CPU forcing, budget control, table building, verification, the FDES checks and the
-detector plugin interface.
+**By retraining (`make reproduce`, then `make verify MODE=full`).** This runs the archived
+training pipeline again. Isolation Forest and One-Class SVM come out within 0.02 of the
+article, and in practice to four decimals. The deep models do not reproduce the article's
+digits, on any hardware, for the reason in the next section, so their results are checked
+against a declared spread instead.
 
-| Output file (under `out/<mode>/`) | Article table or figure | Produced by |
-|---|---|---|
-| `results/model_results.csv` | per-fold rows behind Table 4 (cooldown excluded) | artifact `training.py` |
-| `results/model_results_with_cooldown.csv` | per-fold rows with cooldown included, averaged by `make paper-tables` into the DAGMM rows of Table 11 and the AUC (incl.) column of Table 12 | artifact `training.py` |
-| `tables/table4_single_signal.csv` | Table 4 (mean and std over folds), Figures 2 and 3 | `fdes/tables.py` |
-| `tables/table5_fusion.csv` | Table 5 late fusion, Figures 4 and 5 (needs a run with 2+ signals) | `fdes/tables.py` from `results/fusion_results.csv` |
-| `tables/table7_per_fault_recall.csv` | Table 7 per-fault recall, Figure 6 | `fdes/tables.py` from `results/per_fault_type_results.csv` |
-| `tables/table8_training_time.csv` | Table 8, Figure 7 (times reflect your CPU) | `fdes/tables.py` |
-| `tables/below_chance.json` | the three-of-eight (37.5 percent) figure, models with mean AUC-ROC below 0.5 on every signal (Section V-B, FDES section 8) | `fdes/checks.py` |
-| `tables/fdes_checks.csv` | FDES sections 7 and 8 per (model, signal, fold), covering the predict-all floor, AUC vs 0.5, the flag-everything guard and the Table 12 degenerate rule | `fdes/checks.py` |
-| `tables/friedman_ranking.csv` | Friedman ranks per signal (Section V-C, needs 3+ folds and fusion results) | artifact `significance_tests.py` |
-| `results/optuna_results.csv` | Table 3 search spaces, selected hyperparameters | artifact `training.py` |
-| `results/raw_scores/*.npy` | per-window scores and labels, the input to Tables 10 and 12 | artifact `training.py` |
-| `out/pilot/<detector>_<signal>_fold<k>/pilot_report.md` | FDES verdict for your own detector | `fdes/protocol.py` |
-| `out/check/<name>/check_report.md` | FDES verdict for your own alert or score CSVs | `fdes/byod.py` |
+## Why a retrain cannot give the article's deep-model digits
 
-### The article's tables and figures
+The archived training code (`code/pipeline/training.py` and `run_pipeline.py`) never seeds
+PyTorch or NumPy, and its data loader shuffles the training windows. Each deep-model number
+in the article is therefore one draw from a run whose random state was not recorded, and no
+one can regenerate that draw, on the article's GPUs or anywhere else.
 
-`make paper-tables` and `make figures` rebuild the article's tables and figures in the
-article's layout from one results directory, `out/full/results` by default.
-`RESULTS=archive` points them at the Zenodo results the article was built from.
+This package seeds every run (Python, NumPy and PyTorch with 42 + fold id) and pins threads
+and instruction sets, so its own retrains repeat bit for bit on the same kind of processor.
+They are still different draws from the article's.
 
-```bash
-make paper-tables RESULTS=archive   # seconds, no training
-make figures RESULTS=archive
-make paper-tables                   # after make reproduce
-```
+To measure how far a retrain moves, the six deep models were retrained on fold 5 with the
+article's own hyperparameters under ten seeds (1001 to 1010), on Intel CPUs with the pinning
+above. The outputs, the script and the per-run manifests are in `supplement/seed_test/`.
 
-Tables are written to `<run>/paper/tables/` as CSV and LaTeX, figures to `<run>/paper/figures/`
-as PDF and PNG. Every printed cell is compared with the article's values in `expected/paper/`,
-each difference is logged with both values, and the full list goes to `comparison.csv`.
+- In the 42 cells (model, signal, metric) whose ten-seed range is wider than 0.002 (the
+  `varies` column of `supplement/seed_test/seed_spread.csv`), the article's
+  fold 5 value falls inside the ten-seed range in 35. If the article's value were one more
+  draw from the same spread it would fall inside in 34.4 on average, so the article's numbers
+  look like ordinary draws.
+- The spread depends on the model. LSTM-VAE metrics AUC-ROC does not move (0.170 for every
+  seed). Transformer-AE metrics AUC-ROC runs from 0.401 to 0.983, and Deep SVDD traces
+  AUC-ROC from 0.189 to 0.926.
+- The findings hold in every seed. CNN1D-AE, LSTM-AE and LSTM-VAE score AUC-ROC below 0.5 on
+  every signal in all ten, and no other model does. DAGMM has the best logs AUC-ROC in all
+  ten. With each seed run in place of the archived fold 5, DAGMM still ranks first in the
+  Friedman test on every signal (p at or below 0.002).
 
-| Article | File | Built from |
-|---|---|---|
-| Table 4, Figures 2 and 3 | `table4`, `fig2`, `fig3` | `model_results.csv`, cooldown excluded |
-| Table 5, Figures 4 and 5 | `table5`, `fig4`, `fig5` | `fusion_results.csv`, the six jointly trained models as in the article |
-| Table 6 | `table6` | `fusion_results.csv` and `model_results_with_cooldown.csv` |
-| Table 7, Figure 6 | `table7`, `fig6` | `per_fault_type_results.csv`, or rebuilt from `raw_scores/` and the per-fold thresholds for any model the file lacks |
-| Table 8, Figure 7 | `table8`, `fig7` | `train_time_s` in `model_results.csv`. Your times reflect your CPU |
-| Table 10 | `table10` | the artifact's `prevalence_sensitivity.py` over `raw_scores/`, 5 percent target, best signal per model |
-| Table 11 | `table11` | the artifact's `supervised_baseline.py` over the feature tables, plus the DAGMM rows of `model_results_with_cooldown.csv` |
-| Table 12 | `table12` | `model_results.csv`, `model_results_with_cooldown.csv` and the artifact's `score_based_analyses.py` over `raw_scores/` |
+`expected/deep_seed_spread.csv` holds the range per model, signal and metric.
+[What `make verify` compares](#what-make-verify-compares) gives the gap a retrain may show in
+each deep-model cell.
 
-Use these targets rather than the archive's `code/figures/*.py`. Those are older six-model
-scripts that read `results_v3/merged`, a path the archive does not contain. Table 9 is CPU
-inference cost, which depends on the machine, so it is not rebuilt.
+## Data availability
 
-Figures 8 to 15 (feature importance, separability and training-dynamics diagnostics) come
-from `code/pipeline/ae_diagnostics.py` and `code/analysis/supervised_baseline.py`, which are
-not wrapped here. Tables 13 to 16 (feature ablation, log representation, window sensitivity,
-external validity) are separate studies with their own archived scripts and are out of scope
-for `make reproduce`.
+Every file the package reads is public. Nothing needs an application or an account.
+
+| Data | Source and creation | File | Format | Where | How the package gets it | License |
+|---|---|---|---|---|---|---|
+| Feature tables, per-fold results, raw anomaly scores, pipeline and analysis code | Created by the author. OpenTelemetry traces, metrics and logs from two microservice testbeds on AWS EKS, under a Chaos Mesh fault-injection campaign of 33.5 hours (March 6 to 8, 2026, UTC), processed into 60-second feature windows, and the results of the article's runs | `otel-aiops-benchmark.zip`, 62.9 MB | Parquet, CSV, NumPy `.npy`, Python | Zenodo [10.5281/zenodo.22078287](https://doi.org/10.5281/zenodo.22078287), record v3.1.3 | `make fetch`, md5 checked, into `data/zenodo/otel-aiops-benchmark/` | CC BY 4.0 |
+| External-validity results (Table 16) | Created by the author: the article's models run on the RCAEval benchmark and the Alibaba 2021 production trace. Those third-party datasets are not redistributed. The file's README cites their sources | `paper5_external_validity_code_v3.1.1.zip`, 21 KB | CSV, Python | the same Zenodo record | `make fetch`, md5 checked, into `data/zenodo/external-validity/` | CC BY 4.0 |
+| Figure inputs (Figures 8 to 15) | Created by the author in April 2026: the separability analysis outputs and the per-epoch diagnostics of instrumented autoencoder runs | `supplement/separability_original/`, `supplement/ae_diagnostics/` | CSV, NPZ, JSON, Parquet | this repository | included | CC BY 4.0 |
+| Seed test | Created by the author in November 2026 with `supplement/seed_test/seedtest.py` | `supplement/seed_test/` | CSV, JSON | this repository | included | CC BY 4.0 |
+| The article's printed values | Taken from the article's LaTeX source and checked against the typeset article | `expected/paper/` | CSV | this repository | included | CC BY 4.0 |
+| Raw traces, metrics and logs | The campaign's raw telemetry, scrubbed of identifiers | 10 files, 2.96 GB | as exported | Figshare [10.6084/m9.figshare.34669797](https://doi.org/10.6084/m9.figshare.34669797) | not read by any target | CC BY 4.0 |
+
+## Computing requirements
+
+- Software: Python 3.11 with the 36 packages pinned in `requirements.txt` and
+  `constraints.txt` (numpy 1.26.4, pandas 2.2.3, scikit-learn 1.6.1, scipy 1.13.1, optuna
+  4.1.0, torch 2.5.1 CPU, pyarrow 17.0.0, matplotlib 3.9.2, seaborn 0.13.2), or Docker with the
+  `Dockerfile` (python:3.11-slim pinned by digest). GNU make. On Windows, Git Bash.
+- Hardware: any 64-bit CPU, no GPU. Tested on Apple M5 and M3 Pro laptops (macOS 26 and 27)
+  and in Linux containers on arm64 and on x86_64. A container with 12 GB of memory was
+  enough for every target.
+- Disk: 185 MB for the Zenodo download unpacked, about 90 MB for `make paper`'s output, and
+  1 GB for the venv or 1.75 GB for the Docker image.
+- Runtime: about 6 minutes for `make paper`, see [Runtimes and hardware](#runtimes-and-hardware).
+
+## Every table and figure, and where it comes from
+
+`make paper` (`bin/reproduce.py paper`) is the one command behind all of them. They are written to `out/paper/tables/` (CSV and LaTeX) and
+`out/paper/figures/` (PDF and PNG). The "Cells" column counts printed cells reproduced
+exactly, out of those printed. Every comparison is in `out/paper/tables/comparison.csv`.
+
+| Article | Output | Code | Built from | Cells |
+|---|---|---|---|---|
+| Tables 1, 2, 3, 17 | none | none | Descriptive: positioning, configuration, the search spaces in `training.py`, the fault mapping. Nothing to compute | |
+| Table 4, Figures 2 and 3 | `table4`, `fig2`, `fig3` | `fdes/rebuild.py`, `fdes/paper.py` (`table4`, `write_figures`) | per-fold metrics rebuilt from the raw scores (cooldown excluded) | 120 of 120 |
+| Table 5, Figures 4 and 5 | `table5`, `fig4`, `fig5` | `fdes/rebuild.py` (`fusion_rows`), `fdes/paper.py` (`table5`) | late fusion rebuilt from the raw scores with `run_late_fusion`, the six jointly trained models as in the article | 96 of 96 |
+| Table 6 | `table6` | `fdes/paper.py` (`table6`) | rebuilt fusion and cooldown-included metrics | 48 of 48 |
+| Table 7, Figure 6 | `table7`, `fig6` | `fdes/rebuild.py`, `fdes/paper.py` (`table7`) | per-fault recall rebuilt from the raw scores and the per-fold thresholds. Figure 6 shows the six models the article plots, and `fig6_per_fault_recall_heatmap_all_models` adds Deep SVDD and DAGMM | 56 of 72 |
+| Table 8, Figure 7 | `table8`, `fig7` | `fdes/paper.py` (`table8`) | training times recorded by the original run | 32 of 32 |
+| Table 9 | `table9` | `fdes/extra_tables.py` (`table9`) | single-window timings recorded by `inference_benchmark.py`, one row per model: mean of the three median latencies, the largest p95, the lowest throughput, the largest model | 32 of 32 |
+| Table 10 | `table10` | `fdes/paper.py` (`table10`), artifact `code/analysis/prevalence_sensitivity.py` | the artifact's `prevalence_sensitivity.py` over the raw scores | 40 of 40 |
+| Table 11 | `table11` | `fdes/paper.py` (`table11`, `rf_rerun_report`), artifact `code/analysis/supervised_baseline.py` | the article's Random Forest results deposited on Zenodo, and the rebuilt cooldown-included DAGMM rows. The Random Forests are also trained again and compared, see below | 15 of 18 |
+| Table 12 | `table12` | `fdes/paper.py` (`table12`), artifact `code/analysis/score_based_analyses.py` | the artifact's `score_based_analyses.py` over the raw scores | 27 of 27 |
+| Table 13 | `table13` | `fdes/extra_tables.py` (`table13`) | the deposited feature-ablation results | 18 of 18 |
+| Table 14 | `table14` | `fdes/extra_tables.py` (`table14`), artifact `code/analysis/summarize_log_repr.py` | the deposited log-representation results, summarised by the artifact's `summarize_log_repr.py`, and Table 4's logs rows | 18 of 24 |
+| Table 15 | `table15` | `fdes/extra_tables.py` (`table15`), artifact `code/analysis/window_sensitivity_summary.py` | the deposited window-size results, summarised by the artifact's `window_sensitivity_summary.py` | 24 of 24 |
+| Table 16 | `table16` | `fdes/extra_tables.py` (`table16`) | the external-validity replication results in the record's second file | 24 of 24 |
+| Figure 1 | none | none | architecture diagram, not data | |
+| Figures 8 to 11 | `fig8` to `fig11` | `supplement/figure_scripts/generate_separability.py`, run by `fdes/figures_extra.py` | the article's separability outputs (`supplement/separability_original`), drawn by the article's script. The analysis is also run again on the deposit and compared, see below | |
+| Figures 12 to 15 | `fig12` to `fig15` | `supplement/figure_scripts/generate_ae_diagnostics.py`, run by `fdes/figures_extra.py` | the recorded per-epoch diagnostics of the five autoencoder training runs the figures plot (`supplement/ae_diagnostics`, which also holds the RobustScaler control run the article describes in its text), drawn by the article's script | |
+
+In total 550 of the 575 printed cells in Tables 4 to 16 are reproduced exactly. The other 25
+are listed in [Known differences from the article](#known-differences-from-the-article). Of
+the 550, 373 are recomputed from the archived anomaly scores, 64 restate training and inference
+times the original runs recorded (Tables 8 and 9), 92 aggregate per-fold results that separate
+studies deposited (Table 11's Random Forest rows and Tables 13 to 16), and 21 are text labels,
+such as the best signal per model in Table 10. Sixteen more cells are in the article's LaTeX
+source but were lost when the article was typeset (see the Table 7 note below). They are
+compared too and counted apart.
+
+Tables 13 to 15 report separate studies (feature ablation, log representation, window size)
+whose training runs are not repeated here. Table 16 used third-party datasets that are not
+redistributed. Their tables are rebuilt from the per-fold results each study deposited.
+
+`supplement/` holds what the Zenodo record lacks: the article's scripts for Figures 8 to 15
+(`supplement/figure_scripts`, copied unchanged apart from the edits each script's header
+lists), the outputs those figures plot, and the seed test. The scripts name their files after
+the LaTeX source (fig9 to fig16). The copies `make paper` writes carry the printed numbers.
+
+The supervised Random Forests behind Table 11 are seeded. On macOS they reproduce the archived
+per-fold results exactly. On Linux, which includes the container, they differ by up to 0.003
+per fold, enough to move one printed standard deviation in the third decimal. So Table 11 is
+built from the deposited results, and `make paper` trains the Random Forests again and writes
+the largest per-fold gap to its report.
+
+The separability analysis behind Figures 8 to 11 (`feature_importance_separability.py`) is
+seeded, so `make paper` runs it again on the deposit. The class-separability values (Figure 9)
+and the anomaly-score statistics (Figure 11) agree with the article's outputs to within 1e-6,
+which `make paper` requires. The overlap index in the same file, which no figure plots,
+differs by up to 0.011 and is reported. Under the pinned library versions the Random Forest importances
+(Figure 8) do not: they differ by up to 0.016 on metrics, 0.000 on logs and 0.076 on traces,
+where the top three features come out in a different order. The t-SNE layout (Figure 10) also
+differs, over the same 3000 sampled windows. Both figures are therefore drawn from the
+article's outputs, and the gaps are written to the report. The
+autoencoder runs behind Figures 12 to 15 were not seeded and ran on a GPU, so they cannot be
+run again to the same values.
+
+So Figures 2 to 7 are computed from the deposit by this package. Figures 8 to 15 are drawn by
+the article's own scripts from the article's recorded outputs in `supplement/`. For Figures 9
+and 11 the rerun reproduces those outputs to within 1e-6. The scripts' layout is kept as it
+is, so the clipped axis label on Figure 8's traces panel is also in the article.
+
+`make paper-tables` and `make figures` build the same tables and Figures 2 to 7 from any
+results directory: `out/full/results` after a retrain, or `RESULTS=archive` for the Zenodo
+results as archived. On a retrain they train the Random Forests of Table 11 again.
+
+The comparison values in `expected/paper/` were taken from the article's LaTeX source and
+checked against the typeset article (the IEEE proof of the published version): every value
+printed there appears in it.
 
 ## Known differences from the article
 
-`make paper-tables RESULTS=archive` matches 435 of the article's 469 printed cells. The
-other 34 differ for the reasons below. None changes a finding.
+Three of the article's computations differ from the convention of the rest. `make paper`
+reproduces each as printed and writes the alternative beside it.
 
-1. Table 7 is missing the rows "CPU Stress 80%" and "Mem Stress 80%". An unescaped `%` in
-   those labels turned the rest of each LaTeX line into a comment, and the two labels were
-   joined to the next row. The Average row was computed over all ten faults.
-2. Table 7's Deep SVDD and DAGMM columns do not match the archive. Rebuilt from the
-   archived per-fold scores and thresholds they average 0.864 and 0.816, against 0.824 and
-   0.790 printed. The same rebuild reproduces all 246 archived per-fault rows of the other
-   six models exactly.
-3. Tables 8 and 11 give the Deep SVDD and DAGMM standard deviations as population standard
-   deviations, while every other row uses the sample standard deviation. The three DAGMM
-   PR-AUC standard deviations in Table 11 match neither. `make paper-tables` uses the sample
-   standard deviation throughout.
-4. Tables 10 and 12 paired Deep SVDD and DAGMM with test labels 29 windows off their scores,
-   because of a bug in the archived `training.py` (below). AUC moves by at most 0.001 and
-   PR-AUC by at most 0.004. On the archive, `make paper-tables` builds both tables twice,
-   as archived and with aligned labels, and lists every cell that changes.
-5. Two cells of Table 10 are exact ties at the fourth decimal that the article rounded the
-   other way.
+- Table 8 prints the Deep SVDD and DAGMM standard deviations, and Table 11 the DAGMM F1 and
+  AUC-ROC standard deviations, as population standard deviations, and every other row as the
+  sample standard deviation. Both tables are built that way, and `table8_sample_sd.csv` and
+  `table11_sample_sd.csv` use the sample standard deviation throughout.
+  `sample_sd_changes.csv` lists the 12 cells that differ between the two builds.
+- Table 10 is rounded half to even, so its two values that sit exactly on a half print as
+  0.052 (0.0515) and 0.874 (0.8745). Every other table uses Python's rounding.
+- Tables 10 and 12 paired Deep SVDD and DAGMM with test labels 29 windows off their scores,
+  because of a bug in the archived `training.py` (below). Both tables are built as archived,
+  which reproduces the print, and again with aligned labels (`table10_aligned_labels.csv`,
+  `table12_aligned_labels.csv`). No printed cell moves by more than 0.006 (Table 12, Deep SVDD
+  traces, normalised PR lift), and `aligned_labels_changes.csv` lists every cell that moves.
+
+The 29 cells listed in `expected/paper/exceptions.csv`, each with its reason (25 printed, 4
+in the two Table 7 rows lost in typesetting):
+
+1. Table 7, 20 of the 22 Deep SVDD and DAGMM cells (16 printed, 4 in the lost rows). No archived
+   file produces them. Rebuilt from the archived per-fold scores and thresholds, the columns
+   average 0.864 and 0.816, against 0.824 and 0.790 printed. The Cascade SS Cat+Ord cells
+   (0.933) match. The same rebuild reproduces every archived per-fault row of the other six
+   models, on all three signals. The rebuilt values are in `out/paper/tables/table7.csv`.
+2. Table 11, the three DAGMM PR-AUC standard deviations. The means match. The standard
+   deviations match neither formula, with cooldown included or excluded.
+3. Table 14, the dimension and explained-variance cells of the three Drain/TF-IDF rows (6
+   cells). They are set by the PCA fit on the raw log corpus, which the Zenodo record does not
+   contain. The F1 and AUC-ROC cells of those rows are reproduced.
+
+In the typeset article, Table 7 lacks the values of the rows "CPU Stress 80%" and "Mem Stress
+80%": an unescaped `%` in those labels turned the rest of each LaTeX line into a comment, so
+the two labels run into the next row. The rows are in the article's LaTeX source, and the
+Average row was computed over all ten faults. Their 16 cells are listed in
+`expected/paper/source_only.csv` and counted apart from the printed cells.
 
 The label bug is in two places in `training.py`, the saved label files and late fusion. Its
 list of sequence models, whose labels are shifted by 29 windows, does not include Deep SVDD
 or DAGMM. Metrics computed inside the pipeline (Tables 4 to 8) use aligned labels and are
-unaffected, and the article reports fusion only for the other six models. The wrapper fixes
-both lines when it loads `training.py`, leaves the archived file unchanged, and records the
-fix in every `run_manifest.json`.
+unaffected, and the article reports fusion only for the other six models. On a retrain, the
+wrapper fixes both lines when it loads `training.py`, leaves the archived file unchanged, and
+records the fix in every `run_manifest.json`.
+
+None of these changes a finding.
+
+## Retraining
+
+The full retrain covers 8 models x 3 signals x 5 folds. Read the runtimes section before
+starting it.
+
+```bash
+make reproduce                       # prints the estimate, then runs everything
+make reproduce FOLDS=1               # or one fold at a time
+make verify MODE=full                # works on any set of folds
+```
+
+Each fold is written to `out/full/fold<k>`, and every `make reproduce` rebuilds
+`out/full/results` from all the fold directories there. Running the folds one at a time
+therefore ends with the same five-fold results as one run. `make merge` rebuilds
+`out/full/results` from those directories without training.
+
+To split the grid across machines, run slices with `bin/reproduce.py reproduce --out
+<dir> --folds ... --models ...`, each covering all three signals, and join them with
+`make merge PARTS="<dir> <dir> ..."`. A merged run gives the same numbers as one `make
+reproduce` (see [Seed policy and determinism](#seed-policy-and-determinism)).
+
+A retrain runs `training.py` in its local code path with CPU forced. The pipeline runs as
+archived, with the label fix above applied at load time.
+
+| Output file (under `out/<mode>/`) | What it is | Produced by |
+|---|---|---|
+| `results/model_results.csv` | per-fold rows behind Table 4 (cooldown excluded) | artifact `training.py` |
+| `results/model_results_with_cooldown.csv` | per-fold rows with cooldown included | artifact `training.py` |
+| `tables/table4_single_signal.csv` | Table 4 (mean and std over folds) | `fdes/tables.py` |
+| `tables/table5_fusion.csv` | Table 5 late fusion (needs a run with 2+ signals) | `fdes/tables.py` from `results/fusion_results.csv` |
+| `tables/table7_per_fault_recall.csv` | Table 7 per-fault recall | `fdes/tables.py` from `results/per_fault_type_results.csv` |
+| `tables/table8_training_time.csv` | Table 8 (times reflect your CPU) | `fdes/tables.py` |
+| `tables/below_chance.json` | models with mean AUC-ROC below 0.5 on every signal (Section V-B, FDES section 8) | `fdes/checks.py` |
+| `tables/fdes_checks.csv` | FDES sections 7 and 8 per (model, signal, fold) | `fdes/checks.py` |
+| `tables/friedman_ranking.csv` | Friedman ranks per signal (Section V-C, needs 3+ folds and fusion results) | artifact `significance_tests.py` |
+| `results/optuna_results.csv` | selected hyperparameters | artifact `training.py` |
+| `results/raw_scores/*.npy` | per-window scores and labels | artifact `training.py` |
+| `out/pilot/<detector>_<signal>_fold<k>/pilot_report.md` | FDES verdict for your own detector | `fdes/protocol.py` |
+| `out/check/<name>/check_report.md` | FDES verdict for your own alert or score CSVs | `fdes/byod.py` |
+
+`make paper-tables` builds the article's tables from a retrain's `out/full/results`.
 
 ## Expected output
 
-`make expected` (`bin/build_expected.py`) generates `expected/` from the fetched artifact.
-`make verify` compares against it.
-
 | File | Content |
 |---|---|
-| `model_results_per_fold.csv` | the 120 archived per-fold rows (8 models x 3 signals x 5 folds) |
-| `table4_single_signal.csv` | Table 4 as mean and std, matches the printed table to three decimals |
-| `below_chance.json` | `["CNN1D_AE", "LSTM_AE", "LSTM_VAE"]`, 3 of 8 = 0.375 |
-| `friedman_ranking.csv` | archived 8-model Friedman ranks, DAGMM rank 1 on every signal, p < 0.001 |
-| `metric_reconciliation.csv` | archived Table 12 support (AUC, prevalence, predict-all floor, degenerate flag) |
-| `zenodo_checksums.json` | md5 and size of the record's files |
-| `paper/table*.csv` | the article's printed Tables 4 to 8 and 10 to 12, used by `make paper-tables` |
+| `expected/model_results_per_fold.csv` | the 120 archived per-fold rows (8 models x 3 signals x 5 folds) |
+| `expected/table4_single_signal.csv` | Table 4 as mean and std |
+| `expected/below_chance.json` | `["CNN1D_AE", "LSTM_AE", "LSTM_VAE"]`, 3 of 8 = 0.375 |
+| `expected/friedman_ranking.csv` | archived 8-model Friedman ranks, DAGMM rank 1 on every signal, p < 0.001 |
+| `expected/metric_reconciliation.csv` | archived Table 12 support (AUC, prevalence, predict-all floor, degenerate flag) |
+| `expected/deep_seed_spread.csv` | the seed test's range per deep model, signal and metric |
+| `expected/zenodo_checksums.json` | md5 and size of the record's two files |
+| `expected/paper/table*.csv` | the article's printed Tables 4 to 16, cell by cell |
+| `expected/paper/exceptions.csv` | the 29 cells `make paper` does not reproduce (25 printed, 4 in the two Table 7 rows lost in typesetting), each with its reason |
+| `expected/paper/source_only.csv` | the 16 Table 7 cells that are in the article's LaTeX source but not in the typeset article |
+
+`make expected` (`bin/build_expected.py`) regenerates the first five from the fetched artifact.
+The printed tables were taken from the article's LaTeX source and each value checked against
+the text of the published PDF.
 
 In the archived Table 4, DAGMM scores F1 0.906 and AUC-ROC 0.960 on metrics, 0.818 and
 0.897 on traces, and 0.811 and 0.889 on logs. Isolation Forest scores 0.579 and 0.640 on
@@ -197,11 +375,12 @@ Smoke mode reads `out/smoke` and checks two things.
   trials). Precision, recall, F1, AUC-ROC and PR-AUC must each land within 0.02 of the
   archived per-fold row. In practice they match to four decimals.
 - DAGMM, logs, fold 1, at a reduced budget (2 Optuna trials instead of 25, epochs capped at
-  30). It is checked for finite metrics and passed through the FDES checks, but not compared
-  numerically, because a reduced search will not land on the published number. The recorded
-  venv run gave F1 0.793 and AUC-ROC 0.908, and the container run on the same machine gave F1
-  0.806 and AUC-ROC 0.908 (`runs/2026-08-29-smoke-m4pro/docker/`). The archived 25-trial
-  values are 0.877 and 0.939.
+  30). The cap is applied inside training, so `best_hyperparams` in `model_results.csv` still
+  shows the epoch count the search picked. DAGMM is checked for finite metrics and passed
+  through the FDES checks, but not compared numerically, because a reduced search will not land
+  on the published number. Recorded runs gave F1 0.793 (venv, Python 3.11.14, August 2026) and
+  0.806 (the container, and venvs on Python 3.11.18), with AUC-ROC 0.908 in both. The archived
+  25-trial values are 0.877 and 0.939.
 
 In the recorded smoke run (`runs/2026-08-29-smoke-m4pro/`) both classical rows match to four
 decimals in both environments. Its `fdes_checks.csv` also shows the section 8b guard firing.
@@ -209,14 +388,46 @@ One-Class SVM on logs scores F1 0.565 against a predict-all floor of 0.566 with 
 and is marked EXCLUDE. Isolation Forest (F1 0.580, recall 0.742) and DAGMM (F1 0.793, AUC
 0.908) PASS.
 
-Full mode reads `out/full` and checks three things.
+Full mode (`make verify MODE=full`) reads `out/full` and works on any set of folds, one fold
+or all five. It fails a retrain only on what is deterministic or measured
+(`fdes/retrain_check.py`).
 
-- Per (model, signal) mean F1 and mean AUC-ROC against Table 4. Classical models must be
-  within 0.02, deep models within max(0.05, 2 x published std). The article trained the deep
-  models on GPUs and this package trains them on CPU, so it does not claim bit-for-bit
-  agreement with the article.
-- The below-chance set must equal `{CNN1D_AE, LSTM_AE, LSTM_VAE}` (3 of 8, 37.5 percent).
-- DAGMM must rank first in the Friedman test on each signal with p < 0.05.
+1. Structure. Every requested model and signal has a row for every fold the run holds, and
+   each row's test-set size and anomaly count equal the archive's. These do not depend on
+   training, so a wrong split, merge or feature table fails here exactly.
+2. Isolation Forest and One-Class SVM, per fold, within 0.02 of the archive on precision,
+   recall, F1, AUC-ROC and PR-AUC.
+3. Deep-model AUC-ROC, per cell, within the archived value plus or minus an allowed gap: the
+   seed test's range for that model and signal (at least 0.05), plus 0.05 for the
+   hyperparameter search, which a retrain repeats and the seed test held fixed. CNN1D-AE,
+   LSTM-AE and LSTM-VAE barely move across folds or seeds and are held to it on every fold.
+   Deep SVDD, DAGMM and Transformer-AE change level from fold to fold, so their spread is
+   measured only on fold 5, and only fold 5 is held to it. Their other folds are reported
+   against the fold 5 gap and not judged.
+4. The findings, over the folds the run holds. Among the models run on all three signals,
+   exactly CNN1D-AE, LSTM-AE and LSTM-VAE score mean AUC-ROC below 0.5 on every signal, and
+   DAGMM has the best mean logs AUC-ROC. On a complete 8 x 3 x 5 run, DAGMM also ranks first
+   in the Friedman test on every signal with p < 0.05.
+
+The allowed AUC-ROC gaps:
+
+| Model | Metrics | Logs | Traces | Held to it on |
+|---|---|---|---|---|
+| CNN1D-AE | 0.106 | 0.140 | 0.177 | every fold |
+| LSTM-AE | 0.100 | 0.100 | 0.100 | every fold |
+| LSTM-VAE | 0.100 | 0.100 | 0.100 | every fold |
+| DAGMM | 0.116 | 0.130 | 0.135 | fold 5 |
+| Deep SVDD | 0.224 | 0.425 | 0.787 | fold 5 |
+| Transformer-AE | 0.632 | 0.109 | 0.269 | fold 5 |
+
+The wide Deep SVDD and Transformer-AE gaps are what a retrain really does to those models, as
+the seed test measured. They are not slack added to make a check pass.
+
+`tests/test_retrain_check.py` runs this check on real retrains shipped in
+`supplement/seed_test` and on deliberately broken runs. The ten seed retrains of fold 5, the
+archive as a five-fold run, and the archive with each seed run as fold 5 all pass. A fold
+under the wrong number, a model at chance, a degraded DAGMM, a classical drift of 0.03, a
+missing row, a test set of the wrong size and DAGMM losing its ranking all fail.
 
 `make verify-archive` implements the FDES section 9 requirement that archived tables
 regenerate exactly from the archived raw scores. It recomputes `metric_reconciliation.csv`,
@@ -225,31 +436,28 @@ CSVs and requires equality to three decimals. It runs in about two seconds.
 
 ## Runtimes and hardware
 
-Measured on an Apple M4 Pro (12 cores, 24 GB), CPU only, Python 3.11.14, torch 2.5.1, venv
-route.
+| Target | Wall clock | Machine | Notes |
+|---|---|---|---|
+| `make fetch` | 7 s | Apple M5, 10 cores, 16 GB | both Zenodo files, md5 and unzip |
+| `make paper` | 5 min 14 s to 5 min 38 s | Apple M5, 10 cores, 16 GB | rebuild, Tables 4 to 16, Figures 2 to 15. 6 min 50 s on a loaded M3 Pro, 5 min 56 s in the container |
+| `make test` | 59 s | Apple M5, 10 cores, 16 GB | 314 tests, the Zenodo download present |
+| `make smoke` | 150.4 s (2.5 min) | Apple M4 Pro, 12 cores, 24 GB | logs signal, fold 1. The two classical models take 10.6 s, the reduced-budget DAGMM the rest |
+| `make docker-smoke` | 238.7 s (4.0 min) | Apple M4 Pro | arm64 image, verify PASS, record in `runs/2026-08-29-smoke-m4pro/docker/` |
+| `make verify` | under 2 s | Apple M4 Pro | |
+| `make verify-archive` | 2 s | Apple M4 Pro | |
+| `make pilot` | 2 s | Apple M4 Pro | example Isolation Forest plugin |
+| `make check` | under 2 s | Apple M4 Pro | sample CSVs in `examples/`, one week at five-minute buckets |
+| `make reproduce` | see below | | |
 
-| Target | Wall clock | Notes |
-|---|---|---|
-| `make fetch` | 34 s | 63 MB download plus md5 and unzip |
-| `make smoke` | 150.4 s (2.5 min) | logs signal, fold 1. The two classical models take 10.6 s, the reduced-budget DAGMM the rest |
-| `make docker-smoke` | 238.7 s (4.0 min) | same machine, arm64 image, verify PASS, record in `runs/2026-08-29-smoke-m4pro/docker/` |
-| `make verify` | under 2 s | |
-| `make verify-archive` | 2 s | |
-| `make pilot` | 2 s | example Isolation Forest plugin |
-| `make check` | under 2 s | sample CSVs in `examples/`, one week at five-minute buckets |
-| `make test` | 17 s | 264 unit tests |
-| `make paper-tables RESULTS=archive` | seconds | no training |
-| `make reproduce` | not run in this repository | see the estimate below |
+All CPU only, Python 3.11, torch 2.5.1, venv route.
 
 The artifact records 41.8 hours of training time (Optuna search plus final fit, summed over
 all 120 model-signal-fold cells) on the article's SageMaker instances, with the deep models
 on NVIDIA A10G GPUs. The metrics signal (532k rows, 64 features) accounts for 27.1 of those
-hours.
-
-On a laptop CPU the classical models finish in minutes per signal, and the deep models run
-several times slower than on the GPU. `make reproduce` prints an estimate of 2 to 5 days on
-an 8-core CPU for the whole grid. The estimate is extrapolated from the smoke timing and the
-archived GPU times. It is not a measurement.
+hours. On CPU the deep models run several times slower. In the seed test, one deep model on
+one fold, all three signals, took 16 minutes (LSTM-VAE) to 4.6 hours (Transformer-AE) on 8
+Intel threads, with the article's hyperparameters and no search. `make reproduce` prints an estimate before it starts. It is extrapolated from
+timings, not measured on your machine.
 
 ## Seed policy and determinism
 
@@ -258,7 +466,10 @@ fold 5 uses 47) before each signal and again before each model's Optuna search. 
 signal, fold) cell therefore gives the same scores alone as in a full run, so merged slices
 match one `make reproduce`. Inside the artifact, Optuna's TPE sampler is seeded with 42,
 Isolation Forest uses `random_state=42`, the One-Class SVM subsample uses `RandomState(42)`,
-and the baseline (normal-only) split uses `RandomState(42 + fold_id)`, all unchanged.
+and the baseline (normal-only) split uses `RandomState(42 + fold_id)`, all unchanged. The
+article's own run did not seed PyTorch or NumPy (see
+[Why a retrain cannot give the article's deep-model digits](#why-a-retrain-cannot-give-the-articles-deep-model-digits)).
+The seed test used seeds 1001 to 1010.
 
 PyTorch, MKL, oneDNN, OpenBLAS and NumPy pick kernels from the processor they find and split
 reductions across the threads they get. That changes results in the last digit, and the
@@ -277,7 +488,9 @@ fold 1:
 | One model alone against the same model in a full run | bit-identical |
 | Intel Sapphire Rapids against Intel Ice Lake | bit-identical end to end for the five models tested, and for every operation the models use |
 | Intel against AMD | Isolation Forest and One-Class SVM are bit-identical. The deep models differ, because `sqrt` (used by Adam) and the Cholesky factorisation in DAGMM give different results on the two vendors under every MKL setting tried. On the reduced run, DAGMM scores correlate at 0.95 to 0.98 between the two and the other deep models above 0.999. A full run on AMD has not been compared |
-| CPU against the article's GPU runs | not bit-identical. See [What `make verify` compares](#what-make-verify-compares) |
+| CPU against the article's GPU runs | not comparable digit for digit, because the article's run was not seeded. See [What `make verify` compares](#what-make-verify-compares) |
+
+`make paper` does not train, so none of this affects it.
 
 Folds are partitioned by fault-injection repetition, never by random window sampling. The test
 repetitions are {1,2}, {3,4}, {5,6}, {7,8} and {9,10}. The validation repetition is 10, or 8
@@ -380,8 +593,9 @@ or on your own feature table, and returns a verdict.
    python bin/reproduce.py pilot --detector my_module:MyDetector --signal metrics --fold 1
    ```
 
-   Exit code 0 means PASS, 2 means EXCLUDE under section 8, 3 means INSUFFICIENT and 5 means
-   PASS with a caveat (see [Exit codes](#exit-codes)). Only a failed command exits 1, so an
+   Exit code 0 means PASS, 2 means EXCLUDE under section 8 and 3 means INSUFFICIENT. The pilot
+   returns no other verdict codes (5, PASS with a caveat, is `make check` only). Only a failed
+   command exits 1, so an
    exit of 2 is a rejected detector and not a crash. The report
    (`out/pilot/<name>_<signal>_fold<k>/pilot_report.md`) prints every check with its reference
    value. `pilot_result.json` has the numbers, the fold assignment and the per-check
@@ -536,6 +750,11 @@ Only exit 1 means the command failed, so continuous integration can branch on th
 without reading the output. `make verify` uses 0 for a match and 1 for a mismatch. The same
 table is in `python bin/reproduce.py check --help` and `pilot --help`.
 
+These codes are the ones `bin/reproduce.py` returns. `make` cannot pass them on: when a recipe
+fails, make prints the code (`make: *** [check] Error 3`) and exits 2 itself, the same number
+as EXCLUDE. A pipeline that branches on the verdict has to call `bin/reproduce.py check ...`
+directly.
+
 A run is `INSUFFICIENT` when any of these hold.
 
 - Prevalence is zero. No bucket in the range falls inside an incident window.
@@ -609,19 +828,24 @@ a message telling you to divide by 1000. Sub-second precision is dropped.
 ## Layout
 
 ```
-bin/reproduce.py        single entry point (fetch, smoke, reproduce, merge, verify, verify-archive, estimate, pilot, check, paper-tables, figures)
+bin/reproduce.py        single entry point (fetch, paper, smoke, reproduce, merge, verify, verify-archive, estimate, pilot, check, paper-tables, figures)
 bin/build_expected.py   regenerates expected/ from the fetched artifact
+fdes/rebuild.py         every per-fold result rebuilt from the archived raw scores, behind `make paper`
 fdes/checks.py          FDES section 2, 6, 7, 8 checks
 fdes/protocol.py        FDES section 5 procedure for pilots (reuses the artifact's split, cooldown, threshold and metric code)
 fdes/tables.py          Table 4, 5, 7, 8, below-chance, Friedman, VUS
-fdes/paper.py           the article's Tables 4 to 12 and Figures 2 to 7, behind `make paper-tables` and `make figures`
+fdes/paper.py           the article's Tables 4 to 12 and Figures 2 to 7, and the cell-by-cell verdict
+fdes/extra_tables.py    Tables 9 and 13 to 16 from the deposited result files
+fdes/figures_extra.py   Figures 8 to 15, drawn by the article's scripts in supplement/
+fdes/retrain_check.py   what `make verify MODE=full` holds a retrain to
 fdes/vus.py             VUS-PR and VUS-ROC, ported from the TSB-AD reference implementation
 fdes/byod.py            the bring-your-own-data path behind `make check`
 detectors/base.py       plugin interface; detectors/example_isolation_forest.py
 examples/               sample alert, incident and score CSVs plus the script that makes them
-tests/                  unit tests (`make test`, no Zenodo needed)
+tests/                  unit tests (`make test`). Tests that need the Zenodo download skip without it
 docs/METHOD.md          what each check does and why
-expected/               archived values verify compares against, and the article's printed tables
+expected/               archived values verify compares against, the article's printed tables, the exceptions list
+supplement/             the article's figure scripts and their inputs, and the seed test (not in the Zenodo record)
 runs/                   recorded runs: manifest, verify reports, tables (evidence, not inputs)
 Dockerfile              python:3.11-slim@sha256:1042b6... + CPU torch 2.5.1 + exact pins
 data/, out/             created by fetch and the runs; git-ignored
@@ -629,10 +853,11 @@ data/, out/             created by fetch and the runs; git-ignored
 
 ## License
 
-The wrapper code and packaging in this repository (`bin/`, `fdes/`, `detectors/`,
-`examples/`, `tests/`, `Makefile`, `Dockerfile`, `requirements.txt`, `CITATION.cff` and
-this README) are Apache-2.0. The Zenodo
-artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `LICENSE`.
+The wrapper code, its documentation and its packaging (`bin/`, `fdes/`, `detectors/`,
+`examples/`, `tests/`, `docs/`, `Makefile`, `Dockerfile`, `requirements.txt`, `constraints.txt`,
+`CITATION.cff`, `CHANGELOG.md` and this README) are Apache-2.0. The Zenodo artifact fetched
+into `data/`, the derived tables in `expected/`, the recorded runs in `runs/` and `supplement/`
+are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `LICENSE`.
 
 ## Citation
 
@@ -661,15 +886,15 @@ artifact fetched into `data/` and the derived tables in `expected/` are CC-BY-4.
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.4.1},
+  version   = {1.5.0},
   publisher = {Zenodo},
   year      = {2026},
-  doi       = {10.5281/zenodo.23275206}
+  doi       = {10.5281/zenodo.24518271}
 }
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.23275206](https://doi.org/10.5281/zenodo.23275206) (v1.4.1, concept DOI
+[10.5281/zenodo.24518271](https://doi.org/10.5281/zenodo.24518271) (v1.5.0, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,

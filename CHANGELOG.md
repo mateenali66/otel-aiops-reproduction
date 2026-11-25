@@ -1,5 +1,81 @@
 # Changelog
 
+## [1.5.0] - 2026-11-24
+
+### Added
+
+- `make paper`. It rebuilds every per-fold result the article reports (metrics with and
+  without cooldown, late fusion, per-fault recall) from the archived raw scores with the
+  artifact's own `training.py` functions, checks each value against the archived CSVs, builds
+  Tables 4 to 16 and Figures 2 to 15, and compares every printed cell with the article. It
+  exits 0 only when each printed cell matches or is listed with its reason in
+  `expected/paper/exceptions.csv`. On a clean machine, macOS or the Linux container, 550 of
+  the 575 printed cells match and 25 are listed. Sixteen cells of Table 7 that are in the
+  article's LaTeX source but not in the typeset article (`expected/paper/source_only.csv`) are
+  compared and counted apart. It needs no training.
+- Tables 9 and 13 to 16 (`fdes/extra_tables.py`), built from the deposited result files with
+  the artifact's own summary functions, and their printed values in `expected/paper/`.
+- Figures 8 to 15 (`fdes/figures_extra.py`), drawn by the article's own scripts from the
+  article's recorded outputs, which are added in `supplement/`. The separability analysis
+  behind Figures 8 to 11 is also run again on the deposit and compared with those outputs.
+- `make fetch` also downloads the record's second file, the external-validity results behind
+  Table 16, and checks its md5.
+- `constraints.txt` pins every package the nine pinned requirements pull in. The Dockerfile
+  installs torch alone from the CPU index and everything else from PyPI under these pins, so
+  the container and a venv get the same versions.
+- `supplement/seed_test`: the six deep models retrained on fold 5 with the article's
+  hyperparameters under seeds 1001 to 1010, with the script, the per-run manifests and
+  `expected/deep_seed_spread.csv`.
+- `make merge`. It runs the existing `merge` subcommand inside the image like the other
+  targets. The README told users to call it with the host Python, which fails on the Docker
+  route without the dependencies.
+
+### Changed
+
+- `make verify MODE=full` works on any set of folds and checks what a retrain can be held to
+  (`fdes/retrain_check.py`): exact test-set sizes and anomaly counts, the classical models per
+  fold within 0.02, deep-model AUC-ROC per cell within a gap taken from the seed test, and the
+  article's findings. Before, it compared five-fold means with tolerances that an honest
+  retrain could fail, and it failed every run with fewer than five folds.
+- Tables 8 and 11 print the Deep SVDD and DAGMM standard deviations as the article did
+  (population standard deviation), and Table 10 rounds as the article did (half to even).
+  The sample-SD builds are written beside them.
+- The README explains why a retrain cannot give the article's deep-model digits: the archived
+  training code does not seed PyTorch or NumPy. It used to name CPU against GPU as the cause.
+- Figure 6 shows the six models the article plots. `fig6_per_fault_recall_heatmap_all_models`
+  adds Deep SVDD and DAGMM.
+- `make paper` builds Table 11's Random Forest rows from the article's deposited results. The
+  seeded Random Forests reproduce them exactly on macOS and differ by up to 0.003 per fold on
+  Linux, so they are trained again and the gap is reported instead of judged.
+- `make` runs on `venv/bin/python` (or `venv/Scripts/python.exe` under Git Bash) when that venv
+  exists, so the Quick start works without activating it. The README says that `make` turns
+  every failing exit code into its own 2.
+- `make paper` writes `paper_manifest.json` (package version, Python and library versions,
+  machine, md5 of the Zenodo files read), and `comparison.csv` marks each cell as printed or
+  LaTeX-source-only and gives the reason for each listed one, so it reproduces the report's
+  counts on its own. Run manifests, `verify_report.txt` and `pilot_result.json` record the
+  package version, and run manifests the library versions.
+- `make help` prints the Makefile's header from its first line.
+
+### Fixed
+
+- Running the full reproduction one fold at a time, as the README shows (`make reproduce
+  FOLDS=1`, then `FOLDS=2` and so on), left `out/full/results` holding only the last fold.
+  Each call merged only the folds it had trained, so it replaced the results of the calls
+  before it. `make paper-tables`, `make figures` and `make verify MODE=full` then worked from
+  one fold, printed no standard deviations, and compared a single fold with the article's
+  five-fold means. Each call now merges every `out/full/fold<k>` directory, and leaves out
+  any that holds a model or signal outside the current call. The fold directories themselves
+  were always complete, so a run made this way with 1.4.1 can be rebuilt with `make merge`,
+  without training.
+- `make paper-tables` skips a table, with the reason, when an analysis script it needs is not
+  present, instead of stopping with an import error.
+- No bytecode is written into the fetched artifact under `data/`. `rebuild_differences.txt` is
+  written only when the rebuild differs from the archive.
+- Every target except `make fetch` stops with one line naming the missing packages and the
+  two ways to install them, when the Python it runs on lacks the requirements. Before, a failed
+  `make docker-build` followed by `make paper` ended in a `ModuleNotFoundError` traceback.
+
 ## [1.4.1] - 2026-10-10
 
 ### Changed

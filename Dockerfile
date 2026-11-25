@@ -15,10 +15,11 @@ RUN apt-get update \
 
 WORKDIR /work
 
-# CPU-only torch first (the PyPI wheel on Linux bundles CUDA); everything else exact-pinned.
-RUN pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# CPU-only torch first (the PyPI wheel on Linux bundles CUDA), without its dependencies, which
+# come from PyPI in the next step at the versions in constraints.txt like everything else.
+RUN pip install --no-deps torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+COPY requirements.txt constraints.txt ./
+RUN pip install -r requirements.txt -c constraints.txt
 
 COPY Makefile README.md LICENSE CITATION.cff ./
 COPY bin ./bin
@@ -27,6 +28,7 @@ COPY detectors ./detectors
 COPY examples ./examples
 COPY tests ./tests
 COPY expected ./expected
+COPY supplement ./supplement
 
 # The Makefile bind-mounts data/ (the Zenodo download) and out/ (results). The image
 # declares no VOLUME, because an anonymous volume at /work/data or /work/out would hide those

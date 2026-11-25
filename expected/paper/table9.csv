@@ -1,0 +1,33 @@
+row,column,value
+DAGMM,Lat. med. (ms),0.70
+DAGMM,Lat. p95 (ms),0.89
+DAGMM,Min. tput (win/s),"12,733"
+DAGMM,Size (KB),977
+DEEP_SVDD,Lat. med. (ms),0.52
+DEEP_SVDD,Lat. p95 (ms),0.85
+DEEP_SVDD,Min. tput (win/s),"17,804"
+DEEP_SVDD,Size (KB),211
+Transformer_AE,Lat. med. (ms),0.69
+Transformer_AE,Lat. p95 (ms),1.12
+Transformer_AE,Min. tput (win/s),"10,211"
+Transformer_AE,Size (KB),"3,718"
+LSTM_AE,Lat. med. (ms),0.79
+LSTM_AE,Lat. p95 (ms),0.94
+LSTM_AE,Min. tput (win/s),"9,615"
+LSTM_AE,Size (KB),542
+LSTM_VAE,Lat. med. (ms),0.81
+LSTM_VAE,Lat. p95 (ms),0.94
+LSTM_VAE,Min. tput (win/s),"9,378"
+LSTM_VAE,Size (KB),556
+CNN1D_AE,Lat. med. (ms),0.16
+CNN1D_AE,Lat. p95 (ms),0.20
+CNN1D_AE,Min. tput (win/s),"14,175"
+CNN1D_AE,Size (KB),49
+IsolationForest,Lat. med. (ms),2.83
+IsolationForest,Lat. p95 (ms),3.16
+IsolationForest,Min. tput (win/s),"56,014"
+IsolationForest,Size (KB),"75,209"
+OneClassSVM,Lat. med. (ms),0.14
+OneClassSVM,Lat. p95 (ms),0.15
+OneClassSVM,Min. tput (win/s),"98,820"
+OneClassSVM,Size (KB),190

@@ -1,0 +1,25 @@
+row,column,value
+Engineered aggregates (used throughout),Dim.,5
+Engineered aggregates (used throughout),TF-IDF var.,n/a
+Engineered aggregates (used throughout),Transformer_AE,0.586 / 0.510
+Engineered aggregates (used throughout),DAGMM,0.811 / 0.889
+Engineered aggregates (used throughout),DEEP_SVDD,0.602 / 0.607
+Engineered aggregates (used throughout),IsolationForest,0.579 / 0.640
+Drain/TF-IDF + PCA (5 comp.),Dim.,5
+Drain/TF-IDF + PCA (5 comp.),TF-IDF var.,35.4%
+Drain/TF-IDF + PCA (5 comp.),Transformer_AE,0.833 / 0.918
+Drain/TF-IDF + PCA (5 comp.),DAGMM,0.692 / 0.766
+Drain/TF-IDF + PCA (5 comp.),DEEP_SVDD,0.641 / 0.680
+Drain/TF-IDF + PCA (5 comp.),IsolationForest,0.549 / 0.559
+Drain/TF-IDF + PCA (95% var),Dim.,21
+Drain/TF-IDF + PCA (95% var),TF-IDF var.,95.0%
+Drain/TF-IDF + PCA (95% var),Transformer_AE,0.851 / 0.934
+Drain/TF-IDF + PCA (95% var),DAGMM,0.624 / 0.724
+Drain/TF-IDF + PCA (95% var),DEEP_SVDD,0.713 / 0.831
+Drain/TF-IDF + PCA (95% var),IsolationForest,0.568 / 0.587
+Drain/TF-IDF (no PCA),Dim.,500
+Drain/TF-IDF (no PCA),TF-IDF var.,100%
+Drain/TF-IDF (no PCA),Transformer_AE,0.573 / 0.604
+Drain/TF-IDF (no PCA),DAGMM,0.643 / 0.722
+Drain/TF-IDF (no PCA),DEEP_SVDD,0.590 / 0.680
+Drain/TF-IDF (no PCA),IsolationForest,0.563 / 0.501

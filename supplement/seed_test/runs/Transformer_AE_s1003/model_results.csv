@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+Transformer_AE,metrics,0.4105,1.0,0.5821,0.9567,0.9224,0.4105,30947,75390,75390,5256.59,5,0.01,"{'d_model': 128, 'nhead': 4, 'n_layers': 2, 'lr': 0.0004529783664935371, 'dropout': 0.11395690701105249, 'epochs': 80}"
+Transformer_AE,logs,0.3891,1.0,0.5602,0.3926,0.4911,0.3891,4028,10353,10353,221.61,5,0.01,"{'d_model': 64, 'nhead': 2, 'n_layers': 1, 'lr': 0.005399484409787433, 'dropout': 0.3005575058716044, 'epochs': 80}"
+Transformer_AE,traces,0.2644,1.0,0.4182,0.9763,0.9254,0.2644,3039,11494,11494,1521.49,5,0.01,"{'d_model': 128, 'nhead': 4, 'n_layers': 2, 'lr': 0.00043308435993796206, 'dropout': 0.08002692399577624, 'epochs': 80}"

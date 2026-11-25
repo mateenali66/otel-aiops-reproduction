@@ -1,13 +1,16 @@
 This repository carries two licenses. Which one applies depends on the file.
 
-1. Apache License 2.0: the reproduction wrapper written for this repository, namely
-   bin/, fdes/, detectors/, Makefile, Dockerfile, requirements.txt, CITATION.cff and README.md.
+1. Apache License 2.0: the reproduction wrapper written for this repository and its
+   documentation, namely bin/, fdes/, detectors/, examples/, tests/, docs/, Makefile,
+   Dockerfile, requirements.txt, constraints.txt, CITATION.cff, CHANGELOG.md and README.md.
 
 2. Creative Commons Attribution 4.0 International (CC-BY-4.0): the Zenodo artifact
    "OpenTelemetry AIOps Benchmark" (DOI 10.5281/zenodo.22078287) that `make fetch` downloads
    into data/ (feature tables, results, raw scores, chaos configurations and the pipeline
-   code under code/), and the derived tables under expected/, which are copied or computed
-   from that artifact. Attribution: Mateen Ali Anjum, https://doi.org/10.5281/zenodo.22078287.
+   code under code/), the derived tables under expected/, which are copied or computed
+   from that artifact, the recorded runs under runs/, and supplement/, which adds the
+   article's figure scripts, the outputs those figures plot and the seed-test results. Attribution: Mateen Ali Anjum,
+   https://doi.org/10.5281/zenodo.22078287.
 
 --------------------------------------------------------------------------------
 Apache License

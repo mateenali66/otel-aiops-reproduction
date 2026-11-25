@@ -1,0 +1,55 @@
+{
+  "model": "DEEP_SVDD",
+  "fold": 5,
+  "seed": 1002,
+  "max_epochs": null,
+  "hyperparameters": {
+    "metrics": {
+      "hidden_dim": 32,
+      "n_layers": 1,
+      "latent_dim": 16,
+      "lr": 0.00962640518875267,
+      "dropout": 0.13479367947233611,
+      "pretrain_epochs": 40,
+      "finetune_epochs": 30
+    },
+    "logs": {
+      "hidden_dim": 64,
+      "n_layers": 1,
+      "latent_dim": 16,
+      "lr": 0.0002560742873284924,
+      "dropout": 0.2268302678751436,
+      "pretrain_epochs": 20,
+      "finetune_epochs": 60
+    },
+    "traces": {
+      "hidden_dim": 32,
+      "n_layers": 2,
+      "latent_dim": 8,
+      "lr": 0.000339848446347671,
+      "dropout": 0.20855590418594105,
+      "pretrain_epochs": 40,
+      "finetune_epochs": 30
+    }
+  },
+  "wall_s": 1589.0,
+  "pinned_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "REPRO_TORCH_THREADS": "8",
+    "ATEN_CPU_CAPABILITY": "avx2",
+    "ONEDNN_MAX_CPU_ISA": "AVX2",
+    "MKL_CBWR": "AVX2,STRICT",
+    "OPENBLAS_CORETYPE": "Haswell",
+    "NPY_DISABLE_CPU_FEATURES": "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL AVX512_SPR"
+  },
+  "hardware": {
+    "platform": "Linux-6.18.62-127.179.amzn2023.x86_64-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "python": "3.11.16",
+    "cpu_count": 128,
+    "torch": "2.5.1+cpu",
+    "torch_threads": 8
+  }
+}

@@ -13,7 +13,7 @@
       "size": 21225,
       "md5": "389d2c44188afecd0cb427879858f2a0",
       "url": "https://zenodo.org/api/records/22078287/files/paper5_external_validity_code_v3.1.1.zip/content",
-      "note": "external-validity (RCAEval) code, Table 16; not used by this package"
+      "note": "external-validity code and per-fold results; make fetch downloads it and Table 16 is built from it"
     }
   }
 }

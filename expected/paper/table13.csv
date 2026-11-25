@@ -1,0 +1,19 @@
+row,column,value
+metrics|Full 64 feat.,AUC-ROC,0.867 ± 0.251
+metrics|Full 64 feat.,F1,0.816 ± 0.215
+metrics|Mean-only 22,AUC-ROC,0.964 ± 0.026
+metrics|Mean-only 22,F1,0.924 ± 0.019
+"metrics|Full 64, shuffled",AUC-ROC,0.759 ± 0.249
+"metrics|Full 64, shuffled",F1,0.746 ± 0.210
+traces|Full 11 feat.,AUC-ROC,0.703 ± 0.385
+traces|Full 11 feat.,F1,0.700 ± 0.258
+traces|Simple 5,AUC-ROC,0.697 ± 0.273
+traces|Simple 5,F1,0.675 ± 0.279
+"traces|Full 11, shuffled",AUC-ROC,0.885 ± 0.188
+"traces|Full 11, shuffled",F1,0.636 ± 0.275
+logs|Full 5 feat.,AUC-ROC,0.404 ± 0.065
+logs|Full 5 feat.,F1,0.564 ± 0.003
+logs|Counts only (3),AUC-ROC,0.489 ± 0.125
+logs|Counts only (3),F1,0.574 ± 0.022
+"logs|Full 5, shuffled",AUC-ROC,0.447 ± 0.167
+"logs|Full 5, shuffled",F1,0.564 ± 0.003
