@@ -41,7 +41,10 @@ make test      # unit tests
 The venv route needs Python 3.11, the version the container uses and every recorded run was
 made with. If your system has no `python3.11` (a stock Mac has 3.9), install it before creating
 the venv, for example from python.org or with `uv python install 3.11`, which puts `python3.11`
-in `~/.local/bin`. Recorded runs used 3.11.14 and 3.11.18. The container pins its Python by
+in `~/.local/bin`. On a network that inspects HTTPS traffic, which is common on company laptops,
+`uv python install` can stop with `invalid peer certificate: UnknownIssuer`. Run it as
+`UV_NATIVE_TLS=1 uv python install 3.11` so uv trusts the system's certificates. Recorded runs
+used 3.11.14 and 3.11.18. The container pins its Python by
 image digest. Every `make` target then runs on
 `venv/bin/python`, or `venv/Scripts/python.exe` under Git Bash on Windows, without activating
 it. `make help` prints the route it will take. `requirements.txt` pins the nine packages the code
@@ -630,7 +633,9 @@ tracker.
 
 `make check` takes that input. It buckets a timeline, marks every bucket as alerted or not
 and as inside an incident or not, and runs the FDES section 2, 7 and 8 checks the article
-used. It needs no Zenodo artifact, no detector plugin and no GPU.
+used. It needs no Zenodo artifact, no detector plugin and no GPU. It runs in the same venv or
+container as the rest of the package, set up as in [Quick start](#quick-start), and does not need
+`make fetch`.
 
 If a verdict surprises you, [docs/METHOD.md](docs/METHOD.md) explains what each check measures
 and what it cannot tell you.
