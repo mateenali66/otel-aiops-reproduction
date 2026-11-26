@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+DEEP_SVDD,metrics,0.4124,1.0,0.5839,0.3875,0.357,0.4124,31186,75629,75629,732.01,2,0.45,"{'hidden_dim': 64, 'n_layers': 2, 'latent_dim': 8, 'lr': 0.005399484409787433, 'dropout': 0.3005575058716044, 'pretrain_epochs': 50, 'finetune_epochs': 20}"
+DEEP_SVDD,logs,0.7779,0.6284,0.6952,0.755,0.79,0.782,4142,3346,10467,79.35,2,0.57,"{'hidden_dim': 32, 'n_layers': 2, 'latent_dim': 32, 'lr': 0.001891758740973193, 'dropout': 0.02658364367136093, 'pretrain_epochs': 40, 'finetune_epochs': 30}"
+DEEP_SVDD,traces,0.5026,0.9522,0.6579,0.8768,0.7187,0.736,3074,5824,11529,93.59,2,0.49,"{'hidden_dim': 32, 'n_layers': 2, 'latent_dim': 32, 'lr': 0.00040135678891278564, 'dropout': 0.2080157334586989, 'pretrain_epochs': 40, 'finetune_epochs': 20}"

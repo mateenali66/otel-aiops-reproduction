@@ -1,0 +1,4 @@
+model,signal_type,precision,recall,f1_score,auc_roc,pr_auc,accuracy,true_anomalies,predicted_anomalies,total_samples,train_time_s,fold,threshold,best_hyperparams
+LSTM_AE,metrics,0.4105,1.0,0.582,0.2089,0.3638,0.4105,30946,75389,75389,639.14,3,0.01,"{'hidden_dim': 64, 'n_layers': 2, 'lr': 0.0002051338263087451, 'dropout': 0.07799726016810132, 'epochs': 30}"
+LSTM_AE,logs,0.3922,1.0,0.5635,0.2847,0.4409,0.3922,4082,10407,10407,87.88,3,0.01,"{'hidden_dim': 64, 'n_layers': 2, 'lr': 0.0002051338263087451, 'dropout': 0.07799726016810132, 'epochs': 30}"
+LSTM_AE,traces,0.2633,1.0,0.4169,0.2081,0.2497,0.2633,3022,11477,11477,113.39,3,0.01,"{'hidden_dim': 64, 'n_layers': 2, 'lr': 0.0002051338263087451, 'dropout': 0.07799726016810132, 'epochs': 30}"

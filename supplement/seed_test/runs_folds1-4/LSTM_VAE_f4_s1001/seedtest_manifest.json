@@ -1,0 +1,62 @@
+{
+  "model": "LSTM_VAE",
+  "fold": 4,
+  "seed": 1001,
+  "max_epochs": null,
+  "hyperparameters": {
+    "logs": {
+      "hidden_dim": 64,
+      "n_layers": 2,
+      "latent_dim": 16,
+      "lr": 0.005399484409787433,
+      "dropout": 0.3005575058716044,
+      "beta": 0.1595857358814127,
+      "epochs": 30
+    },
+    "traces": {
+      "hidden_dim": 64,
+      "n_layers": 2,
+      "latent_dim": 16,
+      "lr": 0.005399484409787433,
+      "dropout": 0.3005575058716044,
+      "beta": 0.1595857358814127,
+      "epochs": 30
+    },
+    "metrics": {
+      "hidden_dim": 64,
+      "n_layers": 2,
+      "latent_dim": 16,
+      "lr": 0.005399484409787433,
+      "dropout": 0.3005575058716044,
+      "beta": 0.1595857358814127,
+      "epochs": 30
+    }
+  },
+  "wall_s": 944.8,
+  "pinned_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "REPRO_TORCH_THREADS": "8"
+  },
+  "hardware": {
+    "tool_version": "1.5.0",
+    "platform": "macOS-26.7.3-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.11.18",
+    "cpu_count": 11,
+    "packages": {
+      "numpy": "1.26.4",
+      "pandas": "2.2.3",
+      "scikit-learn": "1.6.1",
+      "scipy": "1.13.1",
+      "optuna": "4.1.0",
+      "torch": "2.5.1",
+      "pyarrow": "17.0.0",
+      "matplotlib": "3.9.2",
+      "seaborn": "0.13.2"
+    },
+    "torch": "2.5.1",
+    "torch_threads": 8
+  }
+}

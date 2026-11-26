@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.5.1] - 2026-11-26
+
+### Added
+
+- `supplement/seed_test/runs_folds1-4`, 240 retrains of the six deep models on folds 1 to 4
+  under seeds 1001 to 1010, with the article's hyperparameters and 8 threads on three Apple
+  M-series Macs, each with its manifest. With fold 5 the seed test covers every fold, 300
+  retrains in all.
+- `supplement/seed_test/cross_processor_m5`, the fold 5 DAGMM and LSTM-AE jobs under seed
+  1001 on an M5. They differ from the same jobs on Intel and repeat exactly on the same M5.
+
+### Changed
+
+- `make verify MODE=full` judges every deep model on every fold against that fold's seed
+  spread. Before, Deep SVDD, DAGMM and Transformer-AE were judged on fold 5 only, and the
+  other three on every fold against the fold 5 spread.
+- Each gap's span includes the article's value, so measured seeds still pass where the
+  article lies outside them (DAGMM traces fold 3 by 0.110, LSTM-AE traces fold 4 by 0.044).
+  Two fold 5 gaps grow, DAGMM logs from 0.130 to 0.155 and LSTM-AE traces from 0.100 to 0.113.
+- A run of one fold reports the below-chance finding without judging it. Two of the 50
+  single-fold seed retrains break it, and all 260 runs of two to five folds keep it.
+- A deep-model cell with no declared spread fails instead of being reported.
+- `expected/deep_seed_spread.csv` and `supplement/seed_test/seed_spread.csv` have a fold
+  column and keep four decimals, and `article_f5` is renamed `article`.
+  `supplement/seed_test/analyse_seeds.py` reads the runs of every fold.
+- The README describes the seed test on every fold, gives the allowed gaps per fold, and adds
+  the two-processor comparison and the run times on the Macs.
+
 ## [1.5.0] - 2026-11-24
 
 ### Added

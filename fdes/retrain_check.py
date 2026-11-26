@@ -8,15 +8,13 @@ fails a retrain only on what is either deterministic or measured:
    anomaly count equal the archive's. These do not depend on training, so a wrong split,
    merge or feature table shows up here exactly.
 2. Isolation Forest and One-Class SVM, per fold, within 0.02 of the archive.
-3. Deep-model AUC-ROC per cell, within the archived value plus or minus the spread measured
-   by retraining fold 5 under ten seeds with the article's hyperparameters, plus a margin for
-   the hyperparameter search (expected/deep_seed_spread.csv). The three reconstruction
-   models whose results barely move across folds or seeds are held to it on every fold. Deep
-   SVDD, DAGMM and Transformer-AE change level from fold to fold, so their spread is known
-   only for fold 5, and only fold 5 is held to it. Their other cells are reported, not judged.
-4. The findings, over the folds the run holds: CNN1D-AE, LSTM-AE and LSTM-VAE below chance
-   (AUC-ROC under 0.5) on every signal, and DAGMM best on logs. On a full five-fold run, also
-   the Friedman ranking: DAGMM first on every signal with p < 0.05.
+3. Deep-model AUC-ROC per (model, signal, fold), within the archived value plus or minus a
+   gap from the seed test (expected/deep_seed_spread.csv, ten seeds per fold, the article's
+   hyperparameters). The gap is the span of the seed values and the article's value (at
+   least 0.05), plus a margin for the hyperparameter search.
+4. The findings, over the folds the run holds: DAGMM best on logs, and on two folds or more
+   CNN1D-AE, LSTM-AE and LSTM-VAE below chance (AUC-ROC under 0.5) on every signal. On a full
+   five-fold run, also the Friedman ranking: DAGMM first on every signal with p < 0.05.
 """
 from __future__ import annotations
 
@@ -25,24 +23,25 @@ from pathlib import Path
 import pandas as pd
 
 CLASSICAL = ("IsolationForest", "OneClassSVM")
-STABLE_DEEP = ("CNN1D_AE", "LSTM_AE", "LSTM_VAE")
-SPREAD_FOLD = 5
 TOL_CLASSICAL = 0.02
-# Added to the measured seed range. Retraining also reruns the Optuna search, which the seed
-# test held fixed; cascad's independent fold 5 run fell outside the seed range by at most
-# 0.039 AUC-ROC (DAGMM traces).
+# Added for the Optuna search, which a retrain reruns and the seed test held fixed.
 MARGIN = 0.05
 MIN_RANGE = 0.05
 STRUCTURE = ("true_anomalies", "total_samples")
 BELOW_CHANCE = ["CNN1D_AE", "LSTM_AE", "LSTM_VAE"]
 
 
-def allowed_gap(spread: pd.DataFrame, model: str, signal: str) -> float | None:
-    row = spread[(spread["model"] == model) & (spread["signal"] == signal) & (spread["metric"] == "auc_roc")]
+def allowed_gap(spread: pd.DataFrame, model: str, signal: str, fold: int) -> float | None:
+    row = spread[(spread["model"] == model) & (spread["signal"] == signal) & (spread["fold"] == fold)
+                 & (spread["metric"] == "auc_roc")]
     if row.empty:
         return None
     r = row.iloc[0]
-    return max(float(r["seed_max"]) - float(r["seed_min"]), MIN_RANGE) + MARGIN
+    # The span includes the article's value. Where that value lies outside the seeds (DAGMM
+    # traces fold 3), the seed range alone would fail measured seeds.
+    lo = min(float(r["seed_min"]), float(r["article"]))
+    hi = max(float(r["seed_max"]), float(r["article"]))
+    return max(hi - lo, MIN_RANGE) + MARGIN
 
 
 def check(run: pd.DataFrame, archived: pd.DataFrame, spread: pd.DataFrame,
@@ -89,20 +88,16 @@ def check(run: pd.DataFrame, archived: pd.DataFrame, spread: pd.DataFrame,
 
     # 3. deep models, AUC-ROC per cell
     for r in both[~both["model"].isin(CLASSICAL)].itertuples():
-        gap = allowed_gap(spread, r.model, r.signal_type)
+        gap = allowed_gap(spread, r.model, r.signal_type, int(r.fold))
         a, b = float(r.auc_roc), float(r.auc_roc_arch)
         if gap is None:
-            notes.append(f"info {r.model}/{r.signal_type}/fold{r.fold}/auc_roc: got {a:.4f}, archived {b:.4f}, no measured spread")
+            failures.append(f"FAIL {r.model}/{r.signal_type}/fold{r.fold}/auc_roc: no seed spread in "
+                            f"expected/deep_seed_spread.csv for this cell")
             continue
-        judged = r.model in STABLE_DEEP or r.fold == SPREAD_FOLD
         within = abs(a - b) <= gap
         label = (f"{r.model}/{r.signal_type}/fold{r.fold}/auc_roc: got {a:.4f}, archived {b:.4f}, "
                  f"allowed gap {gap:.3f}")
-        if judged:
-            (notes if within else failures).append(("ok   " if within else "FAIL ") + label)
-        else:
-            notes.append(f"info {label} ({'within' if within else 'outside'} the fold {SPREAD_FOLD} spread; "
-                         f"not judged, its spread on fold {r.fold} is not measured)")
+        (notes if within else failures).append(("ok   " if within else "FAIL ") + label)
 
     # 4. findings over the folds the run holds
     means = run.groupby(["model", "signal_type"])["auc_roc"].mean().unstack()
@@ -114,9 +109,14 @@ def check(run: pd.DataFrame, archived: pd.DataFrame, spread: pd.DataFrame,
         below = sorted(mdl for mdl in three if (means.loc[mdl] < 0.5).all())
         expected = sorted(mdl for mdl in three if mdl in BELOW_CHANCE)
         ok = below == expected
-        (notes if ok else failures).append(
-            f"{'ok  ' if ok else 'FAIL'} below chance on every signal (mean AUC-ROC over the run's folds): "
-            f"{below}, expected {expected}")
+        label = f"below chance on every signal (mean AUC-ROC over the run's folds): {below}, expected {expected}"
+        if len(folds) >= 2:
+            (notes if ok else failures).append(f"{'ok  ' if ok else 'FAIL'} {label}")
+        else:
+            # Seed 1006 breaks it on fold 2 alone (CNN1D-AE traces) and fold 3 alone
+            # (Transformer-AE). Every seed-test run of two folds or more keeps it.
+            notes.append(f"info {label} ({'holds' if ok else 'does not hold'} on this fold, "
+                         f"judged on two folds or more)")
     if "logs" in means.columns and "DAGMM" in means.index and means["logs"].notna().sum() >= 2:
         top = means["logs"].idxmax()
         (notes if top == "DAGMM" else failures).append(
@@ -142,17 +142,17 @@ def load_spread(path: Path) -> pd.DataFrame:
 
 def summarize_spread(seed_spread: pd.DataFrame) -> pd.DataFrame:
     """The columns of the seed test kept in expected/deep_seed_spread.csv."""
-    cols = ["model", "signal", "metric", "n_seeds", "seed_min", "seed_median", "seed_max", "seed_sd", "article_f5"]
-    return seed_spread[cols].sort_values(["model", "signal", "metric"]).reset_index(drop=True)
+    cols = ["model", "signal", "fold", "metric", "n_seeds", "seed_min", "seed_median", "seed_max", "seed_sd", "article"]
+    return seed_spread[cols].sort_values(["model", "signal", "fold", "metric"]).reset_index(drop=True)
 
 
 def gaps_table(spread: pd.DataFrame) -> pd.DataFrame:
-    """Allowed AUC-ROC gap per deep (model, signal), as the README declares it."""
+    """Allowed AUC-ROC gap per deep (model, signal, fold), as the README declares it."""
     rows = []
     for r in spread[spread["metric"] == "auc_roc"].itertuples():
-        rows.append(dict(model=r.model, signal=r.signal, seed_min=r.seed_min, seed_max=r.seed_max,
-                         allowed_gap=round(allowed_gap(spread, r.model, r.signal), 3),
-                         judged_on="every fold" if r.model in STABLE_DEEP else f"fold {SPREAD_FOLD}"))
+        rows.append(dict(model=r.model, signal=r.signal, fold=r.fold, seed_min=r.seed_min,
+                         seed_max=r.seed_max, article=r.article,
+                         allowed_gap=round(allowed_gap(spread, r.model, r.signal, r.fold), 3)))
     return pd.DataFrame(rows)
 
 

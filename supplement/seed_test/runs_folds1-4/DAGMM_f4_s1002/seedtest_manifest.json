@@ -1,0 +1,68 @@
+{
+  "model": "DAGMM",
+  "fold": 4,
+  "seed": 1002,
+  "max_epochs": null,
+  "hyperparameters": {
+    "metrics": {
+      "hidden_dim": 128,
+      "n_layers": 1,
+      "latent_dim": 8,
+      "n_gmm": 8,
+      "lr": 0.0035033984911586884,
+      "dropout": 0.0993578407670862,
+      "lambda_energy": 0.05063981628665742,
+      "lambda_cov_diag": 0.006538248584518042,
+      "epochs": 80
+    },
+    "logs": {
+      "hidden_dim": 32,
+      "n_layers": 1,
+      "latent_dim": 8,
+      "n_gmm": 2,
+      "lr": 0.00023045254190652806,
+      "dropout": 0.17455198366464997,
+      "lambda_energy": 0.312601804902311,
+      "lambda_cov_diag": 0.004306621062821277,
+      "epochs": 40
+    },
+    "traces": {
+      "hidden_dim": 128,
+      "n_layers": 1,
+      "latent_dim": 8,
+      "n_gmm": 8,
+      "lr": 0.0037183641805732083,
+      "dropout": 0.09983689107917987,
+      "lambda_energy": 0.1633820882890881,
+      "lambda_cov_diag": 0.003912141628549694,
+      "epochs": 30
+    }
+  },
+  "wall_s": 490.0,
+  "pinned_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "REPRO_TORCH_THREADS": "8"
+  },
+  "hardware": {
+    "tool_version": "1.5.0",
+    "platform": "macOS-27.2.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.11.18",
+    "cpu_count": 10,
+    "packages": {
+      "numpy": "1.26.4",
+      "pandas": "2.2.3",
+      "scikit-learn": "1.6.1",
+      "scipy": "1.13.1",
+      "optuna": "4.1.0",
+      "torch": "2.5.1",
+      "pyarrow": "17.0.0",
+      "matplotlib": "3.9.2",
+      "seaborn": "0.13.2"
+    },
+    "torch": "2.5.1",
+    "torch_threads": 8
+  }
+}

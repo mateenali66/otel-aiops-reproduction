@@ -422,7 +422,7 @@ order and are reported either way.
 
 Every threshold in these checks is a named constant. If your operation has a different
 tolerance, change the constant rather than working around the verdict. The values below are
-those in v1.5.0. The source is authoritative.
+those in v1.5.1. The source is authoritative.
 
 | Constant | Value | File | What it sets |
 |---|---|---|---|
@@ -471,7 +471,7 @@ $ python bin/reproduce.py check --alerts examples/alerts_useless.csv \
 ```
 # FDES v1.0.0-draft check report: your own data (alerts mode)
 
-Produced by otel-aiops-reproduction v1.5.0. The specification version and the tool version are different things, and a report that names only the first cannot be traced back to the build that made it.
+Produced by otel-aiops-reproduction v1.5.1. The specification version and the tool version are different things, and a report that names only the first cannot be traced back to the build that made it.
 
 Verdict: **EXCLUDE**
 

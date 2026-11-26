@@ -4,7 +4,7 @@
 |---|---|
 | Article | M. A. Anjum, "Evaluating ML-Based Anomaly Detection on Unified OpenTelemetry Telemetry: An Empirical Study Across Traces, Metrics, and Logs," IEEE Access, vol. 14, pp. 93576-93608, 2026. DOI [10.1109/ACCESS.2026.3705430](https://doi.org/10.1109/ACCESS.2026.3705430). Open access, CC BY 4.0 |
 | Author | Mateen Ali Anjum, Phono Technologies Inc., Toronto, ON, Canada. mateen@phonotech.ca |
-| Package | otel-aiops-reproduction 1.5.0, this README dated 2026-11-24. [github.com/mateenali66/otel-aiops-reproduction](https://github.com/mateenali66/otel-aiops-reproduction), tag `v1.5.0`, archived on Zenodo at [10.5281/zenodo.24518271](https://doi.org/10.5281/zenodo.24518271) (concept DOI [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version) |
+| Package | otel-aiops-reproduction 1.5.1, this README dated 2026-11-26. [github.com/mateenali66/otel-aiops-reproduction](https://github.com/mateenali66/otel-aiops-reproduction), tag `v1.5.1`, archived on Zenodo at [10.5281/zenodo.24563844](https://doi.org/10.5281/zenodo.24563844) (concept DOI [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version) |
 | Data | Zenodo [10.5281/zenodo.22078287](https://doi.org/10.5281/zenodo.22078287) (record v3.1.3), raw telemetry on Figshare [10.6084/m9.figshare.34669797](https://doi.org/10.6084/m9.figshare.34669797). See [Data availability](#data-availability) |
 
 This repository reproduces the article's tables and figures from its published Zenodo
@@ -132,24 +132,33 @@ This package seeds every run (Python, NumPy and PyTorch with 42 + fold id) and p
 and instruction sets, so its own retrains repeat bit for bit on the same kind of processor.
 They are still different draws from the article's.
 
-To measure how far a retrain moves, the six deep models were retrained on fold 5 with the
-article's own hyperparameters under ten seeds (1001 to 1010), on Intel CPUs with the pinning
-above. The outputs, the script and the per-run manifests are in `supplement/seed_test/`.
+The seed test retrained the six deep models on every fold under ten seeds (1001 to 1010),
+with the article's hyperparameters and the pinning above, 300 retrains in all. Fold 5 ran on
+Intel CPUs under Linux, folds 1 to 4 on three Apple M-series Macs under macOS. The outputs,
+script and per-run manifests are in `supplement/seed_test/` (`runs/` for fold 5,
+`runs_folds1-4/` for the rest). A seed gives a different draw on each kind of processor (see
+[Seed policy and determinism](#seed-policy-and-determinism)), so each fold's spread is the
+spread on the processor that ran it.
 
-- In the 42 cells (model, signal, metric) whose ten-seed range is wider than 0.002 (the
-  `varies` column of `supplement/seed_test/seed_spread.csv`), the article's
-  fold 5 value falls inside the ten-seed range in 35. If the article's value were one more
-  draw from the same spread it would fall inside in 34.4 on average, so the article's numbers
-  look like ordinary draws.
-- The spread depends on the model. LSTM-VAE metrics AUC-ROC does not move (0.170 for every
-  seed). Transformer-AE metrics AUC-ROC runs from 0.401 to 0.983, and Deep SVDD traces
-  AUC-ROC from 0.189 to 0.926.
-- The findings hold in every seed. CNN1D-AE, LSTM-AE and LSTM-VAE score AUC-ROC below 0.5 on
-  every signal in all ten, and no other model does. DAGMM has the best logs AUC-ROC in all
-  ten. With each seed run in place of the archived fold 5, DAGMM still ranks first in the
-  Friedman test on every signal (p at or below 0.002).
+- In the 208 cells (model, signal, fold, metric) where the ten seeds differ by more than
+  0.002 (the `varies` column of `supplement/seed_test/seed_spread.csv`), the article's value
+  lies inside the seed range in 176. One more draw from the same spread would land inside
+  170.1 times on average, so the article's numbers look like ordinary draws. Fold 5 alone
+  gives 35 of 42, against 34.4.
+- The widest AUC-ROC range on one signal and fold is 0.04 for LSTM-VAE, 0.06 for LSTM-AE,
+  0.13 for CNN1D-AE, 0.27 for DAGMM, 0.71 for Transformer-AE (traces, fold 1, 0.276 to
+  0.986) and 0.74 for Deep SVDD (traces, fold 5, 0.189 to 0.926). LSTM-VAE metrics AUC-ROC
+  moves by at most 0.0002 on any fold.
+- The article's value lies furthest outside the seed range for DAGMM traces on fold 3 (0.784
+  against 0.893 to 0.985) and LSTM-AE traces on fold 4 (0.239 against 0.174 to 0.195).
+- The findings hold in every seed. With each seed's five-fold retrain in place of the
+  archived deep-model results, CNN1D-AE, LSTM-AE and LSTM-VAE score mean AUC-ROC below 0.5 on
+  every signal and no other model does, DAGMM has the best mean logs AUC-ROC, and DAGMM ranks
+  first in the Friedman test on every signal (p at or below 0.003). A single fold can break
+  the below-chance finding. Seed 1006 gives CNN1D-AE a traces AUC-ROC of 0.502 on fold 2 and
+  puts Transformer-AE below 0.5 on every signal on fold 3.
 
-`expected/deep_seed_spread.csv` holds the range per model, signal and metric.
+`expected/deep_seed_spread.csv` holds the range per model, signal, fold and metric.
 [What `make verify` compares](#what-make-verify-compares) gives the gap a retrain may show in
 each deep-model cell.
 
@@ -352,7 +361,7 @@ archived, with the label fix above applied at load time.
 | `expected/below_chance.json` | `["CNN1D_AE", "LSTM_AE", "LSTM_VAE"]`, 3 of 8 = 0.375 |
 | `expected/friedman_ranking.csv` | archived 8-model Friedman ranks, DAGMM rank 1 on every signal, p < 0.001 |
 | `expected/metric_reconciliation.csv` | archived Table 12 support (AUC, prevalence, predict-all floor, degenerate flag) |
-| `expected/deep_seed_spread.csv` | the seed test's range per deep model, signal and metric |
+| `expected/deep_seed_spread.csv` | the seed test's range per deep model, signal, fold and metric |
 | `expected/zenodo_checksums.json` | md5 and size of the record's two files |
 | `expected/paper/table*.csv` | the article's printed Tables 4 to 16, cell by cell |
 | `expected/paper/exceptions.csv` | the 29 cells `make paper` does not reproduce (25 printed, 4 in the two Table 7 rows lost in typesetting), each with its reason |
@@ -400,37 +409,52 @@ or all five. It fails a retrain only on what is deterministic or measured
    training, so a wrong split, merge or feature table fails here exactly.
 2. Isolation Forest and One-Class SVM, per fold, within 0.02 of the archive on precision,
    recall, F1, AUC-ROC and PR-AUC.
-3. Deep-model AUC-ROC, per cell, within the archived value plus or minus an allowed gap: the
-   seed test's range for that model and signal (at least 0.05), plus 0.05 for the
-   hyperparameter search, which a retrain repeats and the seed test held fixed. CNN1D-AE,
-   LSTM-AE and LSTM-VAE barely move across folds or seeds and are held to it on every fold.
-   Deep SVDD, DAGMM and Transformer-AE change level from fold to fold, so their spread is
-   measured only on fold 5, and only fold 5 is held to it. Their other folds are reported
-   against the fold 5 gap and not judged.
-4. The findings, over the folds the run holds. Among the models run on all three signals,
-   exactly CNN1D-AE, LSTM-AE and LSTM-VAE score mean AUC-ROC below 0.5 on every signal, and
-   DAGMM has the best mean logs AUC-ROC. On a complete 8 x 3 x 5 run, DAGMM also ranks first
-   in the Friedman test on every signal with p < 0.05.
+3. Deep-model AUC-ROC, per model, signal and fold, within the archived value plus or minus an
+   allowed gap: the span of that cell's ten seed-test values and the article's value together
+   (at least 0.05), plus 0.05 for the hyperparameter search, which a retrain repeats and the
+   seed test held fixed. Where the article's value lies outside the seed range, the span
+   stretches to reach it, so no measured seed fails. Every deep model is judged on every fold.
+   How far the search itself moves a result on folds 1 to 4 has not been measured.
+4. The findings, over the folds the run holds. DAGMM has the best mean logs AUC-ROC. On two
+   folds or more, among the models run on all three signals, exactly CNN1D-AE, LSTM-AE and
+   LSTM-VAE score mean AUC-ROC below 0.5 on every signal. On a single fold this is reported
+   only, because 2 of the seed test's 50 single-fold retrains break it and all 260 of its runs
+   of two to five folds keep it. On a complete 8 x 3 x 5 run, DAGMM also ranks first in the
+   Friedman test on every signal with p < 0.05.
 
 The allowed AUC-ROC gaps:
 
-| Model | Metrics | Logs | Traces | Held to it on |
-|---|---|---|---|---|
-| CNN1D-AE | 0.106 | 0.140 | 0.177 | every fold |
-| LSTM-AE | 0.100 | 0.100 | 0.100 | every fold |
-| LSTM-VAE | 0.100 | 0.100 | 0.100 | every fold |
-| DAGMM | 0.116 | 0.130 | 0.135 | fold 5 |
-| Deep SVDD | 0.224 | 0.425 | 0.787 | fold 5 |
-| Transformer-AE | 0.632 | 0.109 | 0.269 | fold 5 |
+| Model | Signal | Fold 1 | Fold 2 | Fold 3 | Fold 4 | Fold 5 |
+|---|---|---|---|---|---|---|
+| CNN1D-AE | metrics | 0.100 | 0.101 | 0.100 | 0.101 | 0.106 |
+| CNN1D-AE | logs | 0.126 | 0.124 | 0.128 | 0.149 | 0.140 |
+| CNN1D-AE | traces | 0.132 | 0.165 | 0.100 | 0.126 | 0.178 |
+| LSTM-AE | metrics | 0.101 | 0.100 | 0.100 | 0.100 | 0.100 |
+| LSTM-AE | logs | 0.100 | 0.100 | 0.100 | 0.100 | 0.100 |
+| LSTM-AE | traces | 0.100 | 0.108 | 0.100 | 0.115 | 0.113 |
+| LSTM-VAE | metrics | 0.100 | 0.100 | 0.100 | 0.100 | 0.100 |
+| LSTM-VAE | logs | 0.100 | 0.100 | 0.100 | 0.100 | 0.100 |
+| LSTM-VAE | traces | 0.100 | 0.100 | 0.100 | 0.100 | 0.100 |
+| DAGMM | metrics | 0.102 | 0.100 | 0.262 | 0.191 | 0.116 |
+| DAGMM | logs | 0.178 | 0.172 | 0.193 | 0.157 | 0.155 |
+| DAGMM | traces | 0.267 | 0.227 | 0.251 | 0.322 | 0.136 |
+| Deep SVDD | metrics | 0.296 | 0.526 | 0.245 | 0.222 | 0.223 |
+| Deep SVDD | logs | 0.352 | 0.395 | 0.247 | 0.374 | 0.425 |
+| Deep SVDD | traces | 0.147 | 0.208 | 0.388 | 0.762 | 0.787 |
+| Transformer-AE | metrics | 0.676 | 0.734 | 0.545 | 0.657 | 0.632 |
+| Transformer-AE | logs | 0.237 | 0.426 | 0.239 | 0.332 | 0.109 |
+| Transformer-AE | traces | 0.760 | 0.503 | 0.369 | 0.638 | 0.269 |
 
 The wide Deep SVDD and Transformer-AE gaps are what a retrain really does to those models, as
 the seed test measured. They are not slack added to make a check pass.
 
 `tests/test_retrain_check.py` runs this check on real retrains shipped in
-`supplement/seed_test` and on deliberately broken runs. The ten seed retrains of fold 5, the
-archive as a five-fold run, and the archive with each seed run as fold 5 all pass. A fold
-under the wrong number, a model at chance, a degraded DAGMM, a classical drift of 0.03, a
-missing row, a test set of the wrong size and DAGMM losing its ranking all fail.
+`supplement/seed_test` and on deliberately broken runs. Every seed retrain of every single
+fold, every seed as a full five-fold retrain (with its own Friedman ranking), the archive as a
+five-fold run, and the archive with each seed run as fold 5 all pass. A fold under the wrong
+number, a model at chance, DAGMM degraded on fold 2 or fold 5, Transformer-AE and Deep SVDD
+far off on fold 1, a classical drift of 0.03, a missing row, a test set of the wrong size, a
+cell with no declared spread and DAGMM losing its ranking all fail.
 
 `make verify-archive` implements the FDES section 9 requirement that archived tables
 regenerate exactly from the archived raw scores. It recomputes `metric_reconciliation.csv`,
@@ -459,7 +483,10 @@ all 120 model-signal-fold cells) on the article's SageMaker instances, with the 
 on NVIDIA A10G GPUs. The metrics signal (532k rows, 64 features) accounts for 27.1 of those
 hours. On CPU the deep models run several times slower. In the seed test, one deep model on
 one fold, all three signals, took 16 minutes (LSTM-VAE) to 4.6 hours (Transformer-AE) on 8
-Intel threads, with the article's hyperparameters and no search. `make reproduce` prints an estimate before it starts. It is extrapolated from
+Intel threads, with the article's hyperparameters and no search. On the Apple M-series Macs
+that ran folds 1 to 4, the median such job took 9 minutes (DAGMM and Deep SVDD on an M5) to
+42 minutes (Transformer-AE on an M3 Pro).
+`make reproduce` prints an estimate before it starts. It is extrapolated from
 timings, not measured on your machine.
 
 ## Seed policy and determinism
@@ -472,7 +499,7 @@ Isolation Forest uses `random_state=42`, the One-Class SVM subsample uses `Rando
 and the baseline (normal-only) split uses `RandomState(42 + fold_id)`, all unchanged. The
 article's own run did not seed PyTorch or NumPy (see
 [Why a retrain cannot give the article's deep-model digits](#why-a-retrain-cannot-give-the-articles-deep-model-digits)).
-The seed test used seeds 1001 to 1010.
+The seed test used seeds 1001 to 1010 on every fold.
 
 PyTorch, MKL, oneDNN, OpenBLAS and NumPy pick kernels from the processor they find and split
 reductions across the threads they get. That changes results in the last digit, and the
@@ -492,6 +519,11 @@ fold 1:
 | Intel Sapphire Rapids against Intel Ice Lake | bit-identical end to end for the five models tested, and for every operation the models use |
 | Intel against AMD | Isolation Forest and One-Class SVM are bit-identical. The deep models differ, because `sqrt` (used by Adam) and the Cholesky factorisation in DAGMM give different results on the two vendors under every MKL setting tried. On the reduced run, DAGMM scores correlate at 0.95 to 0.98 between the two and the other deep models above 0.999. A full run on AMD has not been compared |
 | CPU against the article's GPU runs | not comparable digit for digit, because the article's run was not seeded. See [What `make verify` compares](#what-make-verify-compares) |
+
+The seed test also compares Intel under Linux with an Apple M5 under macOS. The same fold 5
+job under seed 1001 gives DAGMM metrics AUC-ROC 0.975 on Intel and 0.995 on the M5, and
+LSTM-AE metrics 0.205 and 0.192. Run again on the same M5 two days later, both jobs repeat
+every value. A seed fixes the draw on one kind of processor only.
 
 `make paper` does not train, so none of this affects it.
 
@@ -891,15 +923,15 @@ are CC-BY-4.0, attribution Mateen Ali Anjum, DOI 10.5281/zenodo.22078287. See `L
   author    = {Anjum, Mateen Ali},
   title     = {Reproduction package for: Evaluating {ML}-Based Anomaly Detection on Unified
                {OpenTelemetry} Telemetry},
-  version   = {1.5.0},
+  version   = {1.5.1},
   publisher = {Zenodo},
   year      = {2026},
-  doi       = {10.5281/zenodo.24518271}
+  doi       = {10.5281/zenodo.24563844}
 }
 ```
 
 This reproduction package is archived at Zenodo, DOI
-[10.5281/zenodo.24518271](https://doi.org/10.5281/zenodo.24518271) (v1.5.0, concept DOI
+[10.5281/zenodo.24563844](https://doi.org/10.5281/zenodo.24563844) (v1.5.1, concept DOI
 [10.5281/zenodo.22170201](https://doi.org/10.5281/zenodo.22170201) resolves to the latest version).
 
 The specification is the Failure Detection Evaluation Specification v1.0.0-draft,
